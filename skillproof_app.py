@@ -11,7 +11,7 @@ import time
 #  PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="SkillProof — Prove What You Know",
+    page_title="SkillProof - Prove What You Know",
     layout="wide",
     page_icon="⬡",
     initial_sidebar_state="expanded"
