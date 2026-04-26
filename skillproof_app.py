@@ -916,91 +916,30 @@ Return JSON only:
   "revealed_gap": "<null or specific knowledge gap revealed>"
 }}"""
 
-FINAL_ANALYSIS_PROMPT = """Analyse this candidate using BOTH the resume AND the conversational interview transcript.
-
-SCORING RUBRIC (100 pts):
-  A) Proven Technical Skills (from interview) — 50 pts  <- WEIGHT THIS MOST
-  B) Domain Transferability                   — 30 pts
-  C) Academic Background & Experience         — 20 pts
-
-CRITICAL RULES:
-- Interview answers are ground truth. If resume claims X but interview showed Y, use Y.
-- Skipped questions are NEUTRAL — do not penalise. Fall back to resume evidence for those skills.
-- Do NOT go below 40% unless interview showed complete absence of knowledge.
-- Do NOT go above 92%.
-
-JD:
-{jd}
-
-RESUME:
-{resume}
-
-INTERVIEW TRANSCRIPT:
-{transcript}
-
-SKILL CALIBRATION (proven scores from live interview — skipped skills excluded):
-{calibration}
-
-SKIPPED SKILLS NOTE:
+FINAL_ANALYSIS_PROMPT = """Score this candidate. Interview answers override resume claims.
+Rules: 50pts proven skills, 30pts domain fit, 20pts experience. Range: 40-92.
 {skipped_note}
 
-Return JSON only:
-{{
-  "score": <int 0-100>,
-  "resume_score": <int, what score would have been from resume alone>,
-  "role": "<most specific relevant job title>",
-  "summary": "<2-sentence honest assessment that references specific interview answers>",
-  "skills": [
-    {{
-      "name": "<skill>",
-      "claimed": <1-10 from resume>,
-      "current": <1-10 proven in interview, or resume-inferred if skipped>,
-      "required": <1-10>,
-      "evidence": "<brief note — if skipped write: Not assessed in interview, inferred from resume>"
-    }}
-  ],
-  "top_gaps": ["<gap 1>", "<gap 2>", "<gap 3>"],
-  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
-  "calibration_note": "<1 sentence on how interview matched or differed from resume claims, mention any skipped skills by name>"
-}}"""
-
-INTERVIEW_PREP_PROMPT = """Senior technical interviewer. Role: '{role}'. Proven weak areas: {gaps}.
-
-Generate 8 interview Q&As (mix: 2 conceptual, 4 technical, 2 behavioural). Base answers on what a strong candidate would say.
+JD (excerpt): {jd}
+RESUME (excerpt): {resume}
+INTERVIEW: {transcript}
+CALIBRATION: {calibration}
 
 Return JSON only:
-[
-  {{
-    "num": 1,
-    "type": "Conceptual",
-    "q": "<question>",
-    "a": "<2-3 sentence model answer>",
-    "tip": "<practical preparation tip>"
-  }}
-]"""
+{{"score":<int>,"resume_score":<int>,"role":"<title>","summary":"<2 sentences>",
+"skills":[{{"name":"<s>","claimed":<1-10>,"current":<1-10>,"required":<1-10>,"evidence":"<brief>"}}],
+"top_gaps":["<g1>","<g2>","<g3>"],"strengths":["<s1>","<s2>","<s3>"],
+"calibration_note":"<1 sentence>"}}"""
 
-ROADMAP_PROMPT = """Create a 14-day personalised upskilling roadmap.
-Role: '{role}'. Proven weak areas from live interview: {gaps}.
-Candidate proven strengths (use for adjacency reasoning): {strengths}.
+INTERVIEW_PREP_PROMPT = """Technical interviewer. Role: '{role}'. Weak areas: {gaps}.
+Generate 6 interview Q&As (2 conceptual, 3 technical, 1 behavioural).
+Return JSON only — no preamble:
+[{{"num":1,"type":"Conceptual","q":"<question>","a":"<1-2 sentence answer>","tip":"<one tip>"}}]"""
 
-Prioritise skills by adjacency - how close each gap skill is to what the candidate already knows.
-High adjacency skills come first (faster wins). Low adjacency skills come later.
-
-Each day must include a realistic time estimate (most people have 1-2 hrs/day).
-
-Return JSON only:
-[
-  {{
-    "day": 1,
-    "topic": "<specific topic>",
-    "hours": 1.5,
-    "adjacency_note": "<on day 1 of each new skill block: one sentence on why prioritised. null for continuation days>",
-    "activities": ["<activity 1>", "<activity 2>"],
-    "resources": [
-      {{"label": "<platform: title>", "url": "<real URL>", "type": "video|doc|course|github"}}
-    ]
-  }}
-]"""
+ROADMAP_PROMPT = """14-day upskilling roadmap. Role: '{role}'. Gaps: {gaps}. Strengths: {strengths}.
+Adjacency order: skills closest to strengths first. 1-2 hrs/day realistic.
+Return JSON only — no preamble:
+[{{"day":1,"topic":"<topic>","hours":1.5,"adjacency_note":"<why first or null>","activities":["<act1>","<act2>"],"resources":[{{"label":"<platform: title>","url":"<url>","type":"video|course|doc"}}]}}]"""
 
 
 # ─────────────────────────────────────────────
@@ -1127,7 +1066,7 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
                 ],
                 model=p["model"],
                 temperature=temperature,
-                max_tokens=4096,
+                max_tokens=2048,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
@@ -1740,36 +1679,41 @@ elif st.session_state.phase == 2:
                     ("Building 14-day roadmap",     "pending"),
                 ]
             )
-            raw_final = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
-                jd=st.session_state["_jd"][:3000],
-                resume=st.session_state["_resume"][:2500],
-                transcript=transcript[:4000],
-                calibration=calibration,
-                skipped_note=skipped_note
-            ))
-            st.session_state.final_data = parse_json(raw_final)
-
-            # ── Run interview prep + roadmap IN PARALLEL (2x faster) ──
             import concurrent.futures
             import time as _time
-            fd = st.session_state.final_data
+
+            # ── ALL 3 calls fire simultaneously ──
+            def _fetch_final():
+                raw = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
+                    jd=st.session_state["_jd"][:2000],
+                    resume=st.session_state["_resume"][:1500],
+                    transcript=transcript[:2500],
+                    calibration=calibration,
+                    skipped_note=skipped_note
+                ))
+                return parse_json(raw)
+
+            # We need gaps/strengths from final — so final must finish first.
+            # Run final alone, then fire interview+roadmap together.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fd_result = ex.submit(_fetch_final).result()
+            st.session_state.final_data = fd_result
+            fd = fd_result
 
             _final_ph.markdown(f"""
             <div class="sp-loading-overlay">
               <div class="sp-loading-card">
                 <div class="sp-loader-hex">{HEX_SVG}</div>
-                <div class="sp-loader-title">Building your report...</div>
-                <div class="sp-loader-sub">interview prep &amp; roadmap running in parallel</div>
+                <div class="sp-loader-title">Almost done...</div>
+                <div class="sp-loader-sub">interview prep &amp; roadmap — running together</div>
                 <div class="sp-loader-dots">
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
+                  <div class="sp-loader-dot"></div><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div>
                 </div>
                 <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
                 <div class="sp-loader-steps">
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Calibrated analysis complete</div>
-                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview prep</div>
-                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Building 14-day roadmap</div>
+                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Score calculated</div>
+                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Interview prep</div>
+                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ 14-day roadmap</div>
                 </div>
               </div>
             </div>
