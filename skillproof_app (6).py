@@ -740,8 +740,7 @@ def make_gauge(score: int) -> go.Figure:
 def make_bar_chart(skills: list) -> go.Figure:
     names    = [s["name"] for s in skills]
     claimed  = [s.get("claimed", 5) for s in skills]
-    # For skipped skills (current is None), show claimed value with different color via customdata
-    proven   = [s["current"] if s["current"] is not None else None for s in skills]
+    proven   = [s["current"] if s["current"] is not None else 0 for s in skills]
     required = [s["required"] for s in skills]
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -774,9 +773,7 @@ def make_bar_chart(skills: list) -> go.Figure:
 
 def make_radar(skills: list) -> go.Figure:
     cats     = [s["name"] for s in skills] + [skills[0]["name"]]
-    # For skipped skills, use claimed as fallback so the radar doesn't break on None
-    proven   = [(s["current"] if s["current"] is not None else s.get("claimed", 5)) for s in skills]
-    proven   = proven + [proven[0]]
+    proven   = [(s["current"] if s["current"] is not None else 0) for s in skills] + [(skills[0]["current"] if skills[0]["current"] is not None else 0)]
     required = [s["required"] for s in skills] + [skills[0]["required"]]
     claimed  = [s.get("claimed", 5) for s in skills] + [skills[0].get("claimed", 5)]
     fig = go.Figure()
@@ -941,8 +938,8 @@ Return JSON only — no preamble:
 
 ROADMAP_PROMPT = """14-day upskilling roadmap. Role: '{role}'. Gaps: {gaps}. Strengths: {strengths}.
 Adjacency order: skills closest to strengths first. 1-2 hrs/day realistic.
-CRITICAL: Return raw JSON only — no preamble, no markdown, no backticks. All string values must be plain text with no markdown formatting (no bold, no underscores, no asterisks). URLs must be plain URLs with no surrounding underscores or markdown.
-[{{"day":1,"topic":"<topic>","hours":1.5,"adjacency_note":"<why first or null>","activities":["<act1>","<act2>"],"resources":[{{"label":"<platform: title>","url":"<plain_url>","type":"video|course|doc"}}]}}]"""
+Return JSON only — no preamble:
+[{{"day":1,"topic":"<topic>","hours":1.5,"adjacency_note":"<why first or null>","activities":["<act1>","<act2>"],"resources":[{{"label":"<platform: title>","url":"<url>","type":"video|course|doc"}}]}}]"""
 
 
 # ─────────────────────────────────────────────
@@ -978,7 +975,7 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
               {icon} {label}
             </div>'''
 
-    placeholder.markdown(f"""<div style="height:0;overflow:hidden;line-height:0;font-size:0;">
+    placeholder.markdown(f"""
     <div class="sp-loading-overlay">
       <div class="sp-loading-card">
         <div class="sp-loader-hex">{HEX_SVG}</div>
@@ -995,7 +992,7 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
         {'<div class="sp-loader-steps">' + steps_html + '</div>' if steps_html else ''}
       </div>
     </div>
-    </div>""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
     return placeholder
 
 # ─────────────────────────────────────────────
@@ -1038,7 +1035,7 @@ def _get_provider_keys() -> list:
             active.append({**p, "api_key": key})
     return active
 
-def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True, max_tokens: int = 4096) -> str:
+def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True) -> str:
     """
     Multi-provider LLM call with automatic fallback.
     Tries each provider in order: Groq → Qwen → OpenAI.
@@ -1055,8 +1052,6 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
         "You are a JSON-only API. "
         "Your ENTIRE response must be valid JSON — either { } or [ ]. "
         "Start immediately with { or [. No markdown, no fences, no preamble, no postamble. "
-        "NEVER use markdown formatting (__, **, *, _) inside JSON string values. "
-        "All URLs must be plain text — no surrounding underscores or asterisks. "
         "Violation causes critical system failure."
     )
 
@@ -1071,7 +1066,7 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
                 ],
                 model=p["model"],
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=2048,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
@@ -1086,69 +1081,22 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
 
     raise ValueError(f"All providers failed. Last error: {last_error}")
 
-def _strip_md_artifacts(obj):
-    if isinstance(obj, str):
-        s = obj.strip()
-        # Remove leading/trailing __ or _ markdown wrappers
-        s = re.sub(r'^_+|_+$', '', s)
-        return s
-    if isinstance(obj, list):
-        return [_strip_md_artifacts(i) for i in obj]
-    if isinstance(obj, dict):
-        return {k: _strip_md_artifacts(v) for k, v in obj.items()}
-    return obj
-
-def _fix_llm_json(s: str) -> str:
-    """Remove markdown artifacts and fix common LLM JSON mistakes."""
-    # Strip code fences
-    s = re.sub(r"```json\s*", "", s)
-    s = re.sub(r"```\s*", "", s)
-    # Process line by line — __ often appears at start of a line outside strings
-    # e.g:  "url": "__https://...",
-    #       __ "type": "course"
-    fixed = []
-    for line in s.split('\n'):
-        line = re.sub(r'^\s*__\s*', '', line)   # __ at line start (outside string)
-        line = line.replace('__', '')              # __ anywhere else
-        fixed.append(line)
-    s = '\n'.join(fixed)
-    # Trailing commas
-    s = re.sub(r",\s*([\}\]])", r"\1", s)
-    return s.strip()
-
 def parse_json(raw: str):
     if not raw:
         raise ValueError("Empty response.")
-
-    def try_parse(s):
-        try:
-            return _strip_md_artifacts(json.loads(s))
-        except Exception:
-            return None
-
-    # Pass 1: raw as-is
-    r = try_parse(raw)
-    if r is not None: return r
-
-    # Pass 2: clean markdown artifacts
-    cleaned = _fix_llm_json(raw)
-    r = try_parse(cleaned)
-    if r is not None: return r
-
-    # Pass 3: extract array or object block
-    for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
-        m = re.search(pattern, cleaned)
-        if not m: continue
-        r = try_parse(m.group(1))
-        if r is not None: return r
-        # Pass 4: truncated — salvage up to last complete bracket
-        frag = m.group(1)
-        for ch in (']', '}'):
-            last = frag.rfind(ch)
-            if last > 0:
-                r = try_parse(frag[:last + 1])
-                if r is not None: return r
-
+    def clean(s):
+        s = re.sub(r"```json\s*", "", s)
+        s = re.sub(r"```\s*", "", s)
+        s = re.sub(r",\s*([\}\]])", r"\1", s)
+        return s.strip()
+    for attempt in [raw, clean(raw)]:
+        try: return json.loads(attempt)
+        except: pass
+    for pattern in [r"(\{[\s\S]*\})", r"(\[[\s\S]*\])"]:
+        m = re.search(pattern, clean(raw))
+        if m:
+            try: return json.loads(clean(m.group(1)))
+            except: pass
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
 
 def unwrap(data):
@@ -1214,28 +1162,21 @@ with st.sidebar:
             timestamp   = entry.get("timestamp", "")
             score_clr   = "#34d399" if score_val >= 70 else "#fbbf24" if score_val >= 50 else "#f87171"
             is_active   = st.session_state.get("_viewing_history_id") == entry["id"]
-            bg     = "rgba(0,200,150,0.07)" if is_active else "rgba(18,22,48,0.98)"
-            border = "#00c896" if is_active else "rgba(99,102,241,0.25)"
+            bg          = "rgba(0,200,150,0.06)" if is_active else "#0d1220"
+            border      = "#00c896" if is_active else "rgba(255,255,255,0.05)"
             short_title = role_title[:26] + ("…" if len(role_title) > 26 else "")
 
             st.markdown(f"""
-            <div style='background:{bg};
-                        border:1px solid {border};
-                        border-left:3px solid {score_clr};
-                        border-radius:8px;
-                        padding:10px 12px;
-                        margin-bottom:6px;
-                        box-shadow:0 2px 8px rgba(0,0,0,0.45);'>
-              <div style='font-family:Syne,sans-serif; font-size:0.78rem; font-weight:600;
-                          color:#d0dcf4; margin-bottom:5px; line-height:1.3;'
+            <div style='background:{bg}; border:1px solid {border}; border-radius:8px;
+                        padding:10px 12px; margin-bottom:4px;'>
+              <div style='font-size:0.78rem; font-weight:600; color:#dde4f0;
+                          font-family:Syne,sans-serif; margin-bottom:4px;'
                    title='{role_title}'>{short_title}</div>
-              <div style='display:flex; justify-content:space-between; align-items:center;'>
-                <span style='font-family:Space Mono,monospace; font-size:0.68rem;
-                             font-weight:700; color:{score_clr};
-                             background:rgba(0,0,0,0.3); padding:1px 7px; border-radius:4px;'
-                >{score_val}%</span>
-                <span style='font-family:Space Mono,monospace; font-size:0.54rem;
-                             color:#3a4a62;'>{timestamp}</span>
+              <div style='display:flex; justify-content:space-between;'>
+                <span style='font-family:Space Mono,monospace; font-size:0.65rem;
+                             color:{score_clr}; font-weight:700;'>{score_val}%</span>
+                <span style='font-family:Space Mono,monospace; font-size:0.55rem;
+                             color:#1a2a3a;'>{timestamp}</span>
               </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1686,33 +1627,31 @@ elif st.session_state.phase == 2:
                 skipped   = sc_entry.get("skipped", False)
                 claimed   = sk_info.get("claimed_level", 5)
                 required  = sk_info.get("required_level", 7)
-                proven    = None if skipped else int(sc_entry.get("score") or claimed)
-                evidence  = "Skipped — not assessed in interview." if skipped else "Scored from live interview answers."
+                proven    = claimed if skipped else int(sc_entry.get("score") or claimed)
+                evidence  = "Not assessed in interview, inferred from resume." if skipped else "Scored from live interview answers."
                 skills_out.append({
                     "name":     sk_name,
                     "claimed":  claimed,
                     "current":  proven,
                     "required": required,
-                    "skipped":  skipped,
                     "evidence": evidence,
                 })
-                if not skipped:
-                    proven_scores.append(proven)
+                proven_scores.append(proven)
 
             # Weighted proof score: 50% proven skills avg, 30% domain fit, 20% experience baseline
             avg_proven   = (sum(proven_scores) / len(proven_scores) * 10) if proven_scores else 50
             proof_score  = int(min(92, max(40, avg_proven * 0.5 + 65 * 0.3 + 70 * 0.2)))
             resume_score = int(min(92, max(40, sum(s["claimed"] for s in skills_out) / max(len(skills_out),1) * 10 * 0.5 + 65 * 0.3 + 70 * 0.2)))
 
-            # Gaps = skills where proven < required (skip unassessed skills), sorted by gap size
+            # Gaps = skills where proven < required, sorted by gap size
             gaps_sorted   = sorted(
-                [s for s in skills_out if s["current"] is not None and s["current"] < s["required"]],
+                [s for s in skills_out if s["current"] < s["required"]],
                 key=lambda x: x["required"] - x["current"], reverse=True
             )
             top_gaps      = [s["name"] for s in gaps_sorted[:3]]
-            # Strengths = skills where proven >= required (skip unassessed skills)
+            # Strengths = skills where proven >= required
             strong_sorted = sorted(
-                [s for s in skills_out if s["current"] is not None and s["current"] >= s["required"]],
+                [s for s in skills_out if s["current"] >= s["required"]],
                 key=lambda x: x["current"], reverse=True
             )
             strengths     = [s["name"] for s in strong_sorted[:3]]
@@ -1751,7 +1690,7 @@ elif st.session_state.phase == 2:
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
-                ), max_tokens=6000)
+                ))
                 return parse_json(raw)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -1882,44 +1821,48 @@ elif st.session_state.phase == 2:
 
     tags_html = ""
     for sk in skills:
-        current = sk.get("current")  # None when skipped
-        proxy   = current if current is not None else sk.get("claimed", 5)
-        gap_val = sk.get("required", 7) - proxy
-        dc, dl = delta_class(gap_val)
-        tags_html += f'<span class="delta-tag {dc}">{sk["name"]} — {dl}</span>'
+        if sk.get("current") is None:
+            tags_html += f'<span class="delta-tag" style="color:#2a3a52;border-color:#1a2535;background:#0a0d18;">{sk["name"]} — Skipped</span>'
+        else:
+            gap_val = sk.get("required", 7) - sk["current"]
+            dc, dl  = delta_class(gap_val)
+            tags_html += f'<span class="delta-tag {dc}">{sk["name"]} — {dl}</span>'
     st.markdown(f'<div style="margin-bottom:16px;">{tags_html}</div>', unsafe_allow_html=True)
 
     rows = ""
     for sk in skills:
-        claimed   = sk.get("claimed", 5)
-        proven    = sk.get("current")   # None when skipped
-        required  = sk.get("required", 7)
-        skipped   = sk.get("skipped", proven is None)
-        ev        = sk.get("evidence", "—")
+        claimed  = sk.get("claimed", 5)
+        proven   = sk.get("current")   # None if skipped
+        required = sk.get("required", 7)
+        ev       = sk.get("evidence", "—")
+        is_skip  = proven is None
 
-        if skipped or proven is None:
-            proven_display = '<span style="color:#4a6280;">—</span>'
-            drift_str      = '<span style="color:#4a6280;">—</span>'
-            gap_val        = max(0, required - claimed)   # use claimed as proxy for gap bar
+        if is_skip:
+            proven_disp = '<span style="color:#2a3a52;font-style:italic;">—</span>'
+            drift_str   = '<span style="color:#2a3a52;">—</span>'
+            gap_html    = '<span style="color:#2a3a52;font-size:0.7rem;font-style:italic;">skipped</span>'
+            proven_clr  = "#2a3a52"
+            row_style   = "opacity:0.55;"
         else:
-            proven_display = f'{proven}/10'
-            drift          = proven - claimed
-            drift_str      = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
-                              else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
-                              else '<span style="color:#4a6280;">±0</span>')
-            gap_val        = max(0, required - proven)
+            gap_val     = max(0, required - proven)
+            bar_w       = int(gap_val / 9 * 100)
+            clr         = gap_color(gap_val)
+            drift       = proven - claimed
+            proven_disp = f'{proven}/10'
+            proven_clr  = "#00c896"
+            row_style   = ""
+            drift_str   = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
+                           else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
+                           else '<span style="color:#4a6280;">±0</span>')
+            gap_html    = f'<div class="gap-bar-bg"><div class="gap-bar" style="width:{bar_w}%;background:{clr};"></div></div>'
 
-        bar_w = int(gap_val / 9 * 100)
-        clr   = gap_color(gap_val)
-        rows += f"""<tr>
+        rows += f"""<tr style='{row_style}'>
           <td><b style='color:#dde4f0; font-family:Syne,sans-serif;'>{sk['name']}</b></td>
           <td style='text-align:center; color:#4a6280; font-family:Space Mono,monospace;'>{claimed}/10</td>
-          <td style='text-align:center; color:#00c896; font-family:Space Mono,monospace; font-weight:700;'>{proven_display}</td>
+          <td style='text-align:center; color:{proven_clr}; font-family:Space Mono,monospace; font-weight:700;'>{proven_disp}</td>
           <td style='text-align:center; color:#fbbf24; font-family:Space Mono,monospace;'>{required}/10</td>
           <td style='text-align:center; font-family:Space Mono,monospace; font-size:0.8rem;'>{drift_str}</td>
-          <td>
-            <div class='gap-bar-bg'><div class='gap-bar' style='width:{bar_w}%;background:{clr};'></div></div>
-          </td>
+          <td>{gap_html}</td>
           <td style='color:#2a3a52; font-size:0.76rem; max-width:180px;'>{ev}</td>
         </tr>"""
 
