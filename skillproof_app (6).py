@@ -739,8 +739,8 @@ def make_gauge(score: int) -> go.Figure:
 
 def make_bar_chart(skills: list) -> go.Figure:
     names    = [s["name"] for s in skills]
-    claimed  = [s.get("claimed", 5) for s in skills]
-    proven   = [s["current"] if s["current"] is not None else 0 for s in skills]
+    claimed  = [s.get("claimed", s["current"]) for s in skills]
+    proven   = [s["current"] for s in skills]
     required = [s["required"] for s in skills]
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -773,9 +773,9 @@ def make_bar_chart(skills: list) -> go.Figure:
 
 def make_radar(skills: list) -> go.Figure:
     cats     = [s["name"] for s in skills] + [skills[0]["name"]]
-    proven   = [(s["current"] if s["current"] is not None else 0) for s in skills] + [(skills[0]["current"] if skills[0]["current"] is not None else 0)]
+    proven   = [s["current"] for s in skills] + [skills[0]["current"]]
     required = [s["required"] for s in skills] + [skills[0]["required"]]
-    claimed  = [s.get("claimed", 5) for s in skills] + [skills[0].get("claimed", 5)]
+    claimed  = [s.get("claimed", s["current"]) for s in skills] + [skills[0].get("claimed", skills[0]["current"])]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=required, theta=cats, fill="toself", name="Required",
         line_color="#fbbf24", fillcolor="rgba(251,191,36,0.06)"))
@@ -1087,6 +1087,10 @@ def parse_json(raw: str):
     def clean(s):
         s = re.sub(r"```json\s*", "", s)
         s = re.sub(r"```\s*", "", s)
+        # Strip markdown bold/italic around URLs: __url__ or **url** or _url_
+        s = re.sub(r'__([^_]+)__', r'\1', s)
+        s = re.sub(r'\*\*([^*]+)\*\*', r'\1', s)
+        s = re.sub(r'(?<![_\w])_([^_]+)_(?![_\w])', r'\1', s)
         s = re.sub(r",\s*([\}\]])", r"\1", s)
         return s.strip()
     for attempt in [raw, clean(raw)]:
@@ -1821,48 +1825,33 @@ elif st.session_state.phase == 2:
 
     tags_html = ""
     for sk in skills:
-        if sk.get("current") is None:
-            tags_html += f'<span class="delta-tag" style="color:#2a3a52;border-color:#1a2535;background:#0a0d18;">{sk["name"]} — Skipped</span>'
-        else:
-            gap_val = sk.get("required", 7) - sk["current"]
-            dc, dl  = delta_class(gap_val)
-            tags_html += f'<span class="delta-tag {dc}">{sk["name"]} — {dl}</span>'
+        gap_val = sk.get("required", 7) - sk.get("current", 5)
+        dc, dl = delta_class(gap_val)
+        tags_html += f'<span class="delta-tag {dc}">{sk["name"]} — {dl}</span>'
     st.markdown(f'<div style="margin-bottom:16px;">{tags_html}</div>', unsafe_allow_html=True)
 
     rows = ""
     for sk in skills:
-        claimed  = sk.get("claimed", 5)
-        proven   = sk.get("current")   # None if skipped
-        required = sk.get("required", 7)
-        ev       = sk.get("evidence", "—")
-        is_skip  = proven is None
-
-        if is_skip:
-            proven_disp = '<span style="color:#2a3a52;font-style:italic;">—</span>'
-            drift_str   = '<span style="color:#2a3a52;">—</span>'
-            gap_html    = '<span style="color:#2a3a52;font-size:0.7rem;font-style:italic;">skipped</span>'
-            proven_clr  = "#2a3a52"
-            row_style   = "opacity:0.55;"
-        else:
-            gap_val     = max(0, required - proven)
-            bar_w       = int(gap_val / 9 * 100)
-            clr         = gap_color(gap_val)
-            drift       = proven - claimed
-            proven_disp = f'{proven}/10'
-            proven_clr  = "#00c896"
-            row_style   = ""
-            drift_str   = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
-                           else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
-                           else '<span style="color:#4a6280;">±0</span>')
-            gap_html    = f'<div class="gap-bar-bg"><div class="gap-bar" style="width:{bar_w}%;background:{clr};"></div></div>'
-
-        rows += f"""<tr style='{row_style}'>
+        claimed   = sk.get("claimed", sk.get("current", 5))
+        proven    = sk.get("current", 5)
+        required  = sk.get("required", 7)
+        gap_val   = max(0, required - proven)
+        bar_w     = int(gap_val / 9 * 100)
+        clr       = gap_color(gap_val)
+        ev        = sk.get("evidence", "—")
+        drift     = proven - claimed
+        drift_str = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
+                     else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
+                     else '<span style="color:#4a6280;">±0</span>')
+        rows += f"""<tr>
           <td><b style='color:#dde4f0; font-family:Syne,sans-serif;'>{sk['name']}</b></td>
           <td style='text-align:center; color:#4a6280; font-family:Space Mono,monospace;'>{claimed}/10</td>
-          <td style='text-align:center; color:{proven_clr}; font-family:Space Mono,monospace; font-weight:700;'>{proven_disp}</td>
+          <td style='text-align:center; color:#00c896; font-family:Space Mono,monospace; font-weight:700;'>{proven}/10</td>
           <td style='text-align:center; color:#fbbf24; font-family:Space Mono,monospace;'>{required}/10</td>
           <td style='text-align:center; font-family:Space Mono,monospace; font-size:0.8rem;'>{drift_str}</td>
-          <td>{gap_html}</td>
+          <td>
+            <div class='gap-bar-bg'><div class='gap-bar' style='width:{bar_w}%;background:{clr};'></div></div>
+          </td>
           <td style='color:#2a3a52; font-size:0.76rem; max-width:180px;'>{ev}</td>
         </tr>"""
 
