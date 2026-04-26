@@ -941,8 +941,8 @@ Return JSON only — no preamble:
 
 ROADMAP_PROMPT = """14-day upskilling roadmap. Role: '{role}'. Gaps: {gaps}. Strengths: {strengths}.
 Adjacency order: skills closest to strengths first. 1-2 hrs/day realistic.
-Return JSON only — no preamble:
-[{{"day":1,"topic":"<topic>","hours":1.5,"adjacency_note":"<why first or null>","activities":["<act1>","<act2>"],"resources":[{{"label":"<platform: title>","url":"<url>","type":"video|course|doc"}}]}}]"""
+CRITICAL: Return raw JSON only — no preamble, no markdown, no backticks. All string values must be plain text with no markdown formatting (no bold, no underscores, no asterisks). URLs must be plain URLs with no surrounding underscores or markdown.
+[{{"day":1,"topic":"<topic>","hours":1.5,"adjacency_note":"<why first or null>","activities":["<act1>","<act2>"],"resources":[{{"label":"<platform: title>","url":"<plain_url>","type":"video|course|doc"}}]}}]"""
 
 
 # ─────────────────────────────────────────────
@@ -1084,6 +1084,18 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
 
     raise ValueError(f"All providers failed. Last error: {last_error}")
 
+def _strip_md_artifacts(obj):
+    """Recursively strip markdown artifacts like __url__ bold/italic wrapping from strings."""
+    if isinstance(obj, str):
+        # Strip leading/trailing __ (bold) or _ (italic) markdown wrappers
+        s = re.sub(r'^_+|_+$', '', obj.strip())
+        return s
+    if isinstance(obj, list):
+        return [_strip_md_artifacts(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: _strip_md_artifacts(v) for k, v in obj.items()}
+    return obj
+
 def parse_json(raw: str):
     if not raw:
         raise ValueError("Empty response.")
@@ -1091,15 +1103,44 @@ def parse_json(raw: str):
         s = re.sub(r"```json\s*", "", s)
         s = re.sub(r"```\s*", "", s)
         s = re.sub(r",\s*([\}\]])", r"\1", s)
+        # Strip markdown bold/italic wrapping from URLs inside JSON strings
+        s = re.sub(r'"__([^"]*?)__"', r'"\1"', s)
+        s = re.sub(r'"_([^"]*?)_"', r'"\1"', s)
         return s.strip()
-    for attempt in [raw, clean(raw)]:
-        try: return json.loads(attempt)
-        except: pass
-    for pattern in [r"(\{[\s\S]*\})", r"(\[[\s\S]*\])"]:
-        m = re.search(pattern, clean(raw))
+
+    def try_parse(s):
+        try:
+            result = json.loads(s)
+            return _strip_md_artifacts(result)
+        except Exception:
+            return None
+
+    # Attempt 1: raw as-is
+    r = try_parse(raw)
+    if r is not None: return r
+
+    cleaned = clean(raw)
+
+    # Attempt 2: cleaned
+    r = try_parse(cleaned)
+    if r is not None: return r
+
+    # Attempt 3: extract JSON block via regex
+    for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
+        m = re.search(pattern, cleaned)
         if m:
-            try: return json.loads(clean(m.group(1)))
-            except: pass
+            r = try_parse(m.group(1))
+            if r is not None: return r
+            # Attempt 4: truncated JSON — try trimming to last complete item
+            fragment = m.group(1)
+            # Find last complete object/array boundary
+            for end_char, open_char in [(']', '['), ('}', '{')]:
+                last = fragment.rfind(end_char)
+                if last > 0:
+                    trimmed = fragment[:last+1]
+                    r = try_parse(trimmed)
+                    if r is not None: return r
+
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
 
 def unwrap(data):
