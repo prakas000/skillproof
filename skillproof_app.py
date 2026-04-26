@@ -11,7 +11,7 @@ import time
 #  PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="SkillProof - Prove What You Know",
+    page_title="SkillProof — Prove What You Know",
     layout="wide",
     page_icon="⬡",
     initial_sidebar_state="expanded"
@@ -1206,61 +1206,55 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Interview History Panel ──
-    if st.session_state.get("chat_history"):
+    # ── Assessment History Panel (ChatGPT-style) ──
+    history = st.session_state.get("assessment_history", [])
+    if history:
         st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
         st.markdown("""
         <div style='font-family:Space Mono,monospace; font-size:0.6rem; color:#00c896;
-                    letter-spacing:0.12em; text-transform:uppercase; margin-bottom:12px;
-                    display:flex; align-items:center; gap:8px;'>
-            <span>⬡</span> Interview History
+                    letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px;'>
+            ⬡ Past Assessments
         </div>
         """, unsafe_allow_html=True)
 
-        for msg in st.session_state.chat_history:
-            role    = msg.get("role", "")
-            content = msg.get("content", "")
-            if not content:
-                continue
-            if role in ("assistant", "agent"):
-                st.markdown(f"""
-                <div style='background:#0d1220;
-                     border-left:2px solid #00c896;
-                     border-radius:6px;
-                     padding:10px 12px;
-                     margin-bottom:8px;
-                     font-size:0.75rem;
-                     color:#4a6280;
-                     line-height:1.55;
-                     word-break:break-word;'>
-                    <span style='display:block; color:#00c896; font-size:0.58rem;
-                                 letter-spacing:0.1em; margin-bottom:4px;'>
-                        ⬡ SKILLPROOF
-                    </span>
-                    {content}
-                </div>
-                """, unsafe_allow_html=True)
-            elif role == "user":
-                st.markdown(f"""
-                <div style='background:#0c0f1e;
-                     border-left:2px solid rgba(99,102,241,0.4);
-                     border-radius:6px;
-                     padding:10px 12px;
-                     margin-bottom:8px;
-                     font-size:0.75rem;
-                     color:#4a6280;
-                     line-height:1.55;
-                     word-break:break-word;'>
-                    <span style='display:block; color:#818cf8; font-size:0.58rem;
-                                 letter-spacing:0.1em; margin-bottom:4px;'>
-                        YOU
-                    </span>
-                    {content}
-                </div>
-                """, unsafe_allow_html=True)
+        for i, entry in enumerate(history):
+            role_title  = entry.get("role", "Unknown Role")
+            score_val   = entry.get("score", 0)
+            timestamp   = entry.get("timestamp", "")
+            score_clr   = "#34d399" if score_val >= 70 else "#fbbf24" if score_val >= 50 else "#f87171"
+            is_active   = st.session_state.get("_viewing_history_id") == entry["id"]
+            bg          = "rgba(0,200,150,0.06)" if is_active else "#0d1220"
+            border      = "#00c896" if is_active else "rgba(255,255,255,0.05)"
+            short_title = role_title[:26] + ("…" if len(role_title) > 26 else "")
 
-        if st.button("✕  Clear History", key="clear_hist"):
-            st.session_state.chat_history = []
+            st.markdown(f"""
+            <div style='background:{bg}; border:1px solid {border}; border-radius:8px;
+                        padding:10px 12px; margin-bottom:4px;'>
+              <div style='font-size:0.78rem; font-weight:600; color:#dde4f0;
+                          font-family:Syne,sans-serif; margin-bottom:4px;'
+                   title='{role_title}'>{short_title}</div>
+              <div style='display:flex; justify-content:space-between;'>
+                <span style='font-family:Space Mono,monospace; font-size:0.65rem;
+                             color:{score_clr}; font-weight:700;'>{score_val}%</span>
+                <span style='font-family:Space Mono,monospace; font-size:0.55rem;
+                             color:#1a2a3a;'>{timestamp}</span>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button(f"↗ View report", key=f"hist_{entry['id']}"):
+                st.session_state.final_data          = entry["final_data"]
+                st.session_state.interview_data      = entry["interview_data"]
+                st.session_state.roadmap_data        = entry["roadmap_data"]
+                st.session_state.skill_scores        = entry["skill_scores"]
+                st.session_state.chat_history        = entry["chat_history"]
+                st.session_state._viewing_history_id = entry["id"]
+                st.session_state.phase = 2
+                st.rerun()
+
+        if st.button("✕  Clear All History", key="clear_all_hist"):
+            st.session_state.assessment_history     = []
+            st.session_state._viewing_history_id    = None
             st.rerun()
 
     st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
@@ -1755,12 +1749,17 @@ elif st.session_state.phase == 2:
             ))
             st.session_state.final_data = parse_json(raw_final)
 
+            # ── Run interview prep + roadmap IN PARALLEL (2x faster) ──
+            import concurrent.futures
+            import time as _time
+            fd = st.session_state.final_data
+
             _final_ph.markdown(f"""
             <div class="sp-loading-overlay">
               <div class="sp-loading-card">
                 <div class="sp-loader-hex">{HEX_SVG}</div>
-                <div class="sp-loader-title">Preparing interview prep</div>
-                <div class="sp-loader-sub">crafting tailored questions &amp; answers</div>
+                <div class="sp-loader-title">Building your report...</div>
+                <div class="sp-loader-sub">interview prep &amp; roadmap running in parallel</div>
                 <div class="sp-loader-dots">
                   <div class="sp-loader-dot"></div>
                   <div class="sp-loader-dot"></div>
@@ -1770,47 +1769,53 @@ elif st.session_state.phase == 2:
                 <div class="sp-loader-steps">
                   <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Calibrated analysis complete</div>
                   <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview prep</div>
-                  <div class="sp-loader-step"><div class="sp-loader-step-dot"></div>· Building 14-day roadmap</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-            fd = st.session_state.final_data
-            raw_int = call_groq(None, INTERVIEW_PREP_PROMPT.format(
-                role=fd.get("role", "the role"),
-                gaps=", ".join(fd.get("top_gaps", []))
-            ))
-            idata = parse_json(raw_int)
-            st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list,dict)) else []
-
-            _final_ph.markdown(f"""
-            <div class="sp-loading-overlay">
-              <div class="sp-loading-card">
-                <div class="sp-loader-hex">{HEX_SVG}</div>
-                <div class="sp-loader-title">One last thing...</div>
-                <div class="sp-loader-sub">building your personalised roadmap</div>
-                <div class="sp-loader-dots">
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                </div>
-                <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
-                <div class="sp-loader-steps">
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Calibrated analysis complete</div>
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Interview prep ready</div>
                   <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Building 14-day roadmap</div>
                 </div>
               </div>
             </div>
             """, unsafe_allow_html=True)
-            raw_road = call_groq(None, ROADMAP_PROMPT.format(
-                role=fd.get("role", "the role"),
-                gaps=", ".join(fd.get("top_gaps", [])),
-                strengths=", ".join(fd.get("strengths", []))
-            ))
-            rdata = parse_json(raw_road)
-            st.session_state.roadmap_data = unwrap(rdata) if isinstance(rdata, (list,dict)) else []
+
+            def _fetch_interview():
+                raw = call_groq(None, INTERVIEW_PREP_PROMPT.format(
+                    role=fd.get("role", "the role"),
+                    gaps=", ".join(fd.get("top_gaps", []))
+                ))
+                return parse_json(raw)
+
+            def _fetch_roadmap():
+                raw = call_groq(None, ROADMAP_PROMPT.format(
+                    role=fd.get("role", "the role"),
+                    gaps=", ".join(fd.get("top_gaps", [])),
+                    strengths=", ".join(fd.get("strengths", []))
+                ))
+                return parse_json(raw)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                fut_int  = executor.submit(_fetch_interview)
+                fut_road = executor.submit(_fetch_roadmap)
+                idata = fut_int.result()
+                rdata = fut_road.result()
+
+            st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list, dict)) else []
+            st.session_state.roadmap_data   = unwrap(rdata) if isinstance(rdata, (list, dict)) else []
             _final_ph.empty()
+
+            # ── Save completed assessment to history ──
+            if "assessment_history" not in st.session_state:
+                st.session_state.assessment_history = []
+            v_cls_h, v_lbl_h = verdict(int(fd.get("score", 0)))
+            st.session_state.assessment_history.insert(0, {
+                "id":             str(int(_time.time())),
+                "role":           fd.get("role", "Unknown Role"),
+                "score":          fd.get("score", 0),
+                "verdict":        v_lbl_h,
+                "timestamp":      _time.strftime("%d %b %Y, %H:%M"),
+                "final_data":     st.session_state.final_data,
+                "interview_data": st.session_state.interview_data,
+                "roadmap_data":   st.session_state.roadmap_data,
+                "skill_scores":   list(st.session_state.skill_scores),
+                "chat_history":   list(st.session_state.chat_history),
+            })
 
         except Exception as e:
             st.error(f"❌  Final analysis failed: {e}")
