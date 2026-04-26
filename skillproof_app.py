@@ -738,6 +738,8 @@ def make_gauge(score: int) -> go.Figure:
     return fig
 
 def make_bar_chart(skills: list) -> go.Figure:
+    if not skills:
+        return go.Figure()
     names    = [s["name"] for s in skills]
     claimed  = [s.get("claimed", s["current"]) for s in skills]
     proven   = [s["current"] for s in skills]
@@ -772,6 +774,8 @@ def make_bar_chart(skills: list) -> go.Figure:
     return fig
 
 def make_radar(skills: list) -> go.Figure:
+    if not skills:
+        return go.Figure()
     cats     = [s["name"] for s in skills] + [skills[0]["name"]]
     proven   = [s["current"] for s in skills] + [skills[0]["current"]]
     required = [s["required"] for s in skills] + [skills[0]["required"]]
@@ -917,7 +921,7 @@ Return JSON only:
 }}"""
 
 FINAL_ANALYSIS_PROMPT = """Score this candidate. Interview answers override resume claims.
-Rules: 50pts proven skills, 30pts domain fit, 20pts experience. Range: 40-92.
+Rules: 50pts proven skills avg (1-10 scale), 30pts domain fit, 20pts experience. Score is 0-100.
 {skipped_note}
 
 JD (excerpt): {jd}
@@ -1236,8 +1240,16 @@ st.markdown(f"""
 phases = ["01 · Input", "02 · Probe", "03 · Score", "04 · Roadmap"]
 phase_html = '<div class="phase-bar">'
 for i, p in enumerate(phases):
-    cls = "active" if i == st.session_state.phase else ("done" if i < st.session_state.phase else "")
-    icon = "✓ " if i < st.session_state.phase else ""
+    effective_phase = st.session_state.phase
+    if effective_phase == 2 and i == 3:
+        cls = "active"  # Roadmap step also lights up during results phase
+    elif i == effective_phase:
+        cls = "active"
+    elif i < effective_phase:
+        cls = "done"
+    else:
+        cls = ""
+    icon = "✓ " if i < effective_phase else ""
     phase_html += f'<div class="phase-step {cls}"><span class="phase-num">{icon}{p}</span></div>'
 phase_html += '</div>'
 st.markdown(phase_html, unsafe_allow_html=True)
@@ -1392,6 +1404,10 @@ if st.session_state.phase == 0:
                     if sk and qs:
                         all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
 
+                if not all_probes:
+                    st.error("❌  No probe questions could be generated. Try again or switch probe mode.")
+                    st.stop()
+
                 st.session_state.skill_plan      = plan
                 st.session_state.probe_questions = all_probes
                 st.session_state.chat_history    = []
@@ -1485,7 +1501,7 @@ elif st.session_state.phase == 1:
                     if msg.get("skill"):
                         skill_tag = f'<div class="bubble-skill-tag">PROBING: {msg["skill"]}</div>'
                     score_tag = ""
-                    if msg.get("score"):
+                    if msg.get("score") is not None:
                         sig = str(msg.get("signal", "")).upper()
                         sc  = str(msg.get("score", ""))
                         score_tag = f'<div style="font-size:0.72rem;color:#006b50;margin-top:8px;font-family:Space Mono,monospace;">Signal: {sig} · Score: {sc}/10</div>'
@@ -1547,7 +1563,7 @@ elif st.session_state.phase == 1:
                             answer=answer.strip()
                         ))
                         ev = parse_json(raw_eval)
-                        ev_score    = ev.get("score", 5)
+                        ev_score    = max(1, min(10, int(ev.get("score") or 5)))
                         ev_signal   = ev.get("signal", "adequate")
                         ev_feedback = ev.get("feedback", "Answer recorded.")
 
@@ -1565,8 +1581,10 @@ elif st.session_state.phase == 1:
                         # Advance
                         next_qi = qi + 1
                         if next_qi >= total_q_this_skill:
-                            recent_scores = [m["score"] for m in st.session_state.chat_history if m.get("score") is not None]
-                            avg = recent_scores[-1] if recent_scores else 5
+                            # Collect only the scores from this skill's questions (last N scored messages)
+                            all_scored = [m["score"] for m in st.session_state.chat_history if m.get("score") is not None]
+                            skill_q_scores = all_scored[-total_q_this_skill:] if len(all_scored) >= total_q_this_skill else all_scored
+                            avg = round(sum(skill_q_scores) / len(skill_q_scores), 2) if skill_q_scores else 5
                             st.session_state.skill_scores.append({"skill": skill["name"], "score": avg})
                             st.session_state.current_skill_idx += 1
                             st.session_state.current_q_idx = 0
@@ -1615,33 +1633,37 @@ elif st.session_state.phase == 2:
 
             # ── Step 1: Compute final_data LOCALLY — zero LLM calls needed ──
             # All scores already exist in skill_scores + skill_plan. Build the report instantly.
-            plan       = st.session_state.skill_plan or {}
-            role_title = plan.get("role", "the role")
-            plan_skills = {s["name"]: s for s in plan.get("skills", [])}
+            plan        = st.session_state.skill_plan or {}
+            role_title  = plan.get("role", "the role")
+            raw_skills  = plan.get("skills") or []
+            plan_skills = {s["name"]: s for s in raw_skills if isinstance(s, dict) and "name" in s}
             sc_map     = {s["skill"]: s for s in (st.session_state.skill_scores or [])}
 
             skills_out = []
             proven_scores = []
-            for sk_name, sk_info in plan_skills.items():
-                sc_entry  = sc_map.get(sk_name, {})
-                skipped   = sc_entry.get("skipped", False)
-                claimed   = sk_info.get("claimed_level", 5)
-                required  = sk_info.get("required_level", 7)
-                proven    = claimed if skipped else int(sc_entry.get("score") or claimed)
-                evidence  = "Not assessed in interview, inferred from resume." if skipped else "Scored from live interview answers."
-                skills_out.append({
-                    "name":     sk_name,
-                    "claimed":  claimed,
-                    "current":  proven,
-                    "required": required,
-                    "evidence": evidence,
-                })
-                proven_scores.append(proven)
+            if plan_skills:
+                for sk_name, sk_info in plan_skills.items():
+                    sc_entry  = sc_map.get(sk_name, {})
+                    skipped   = sc_entry.get("skipped", False)
+                    claimed   = int(sk_info.get("claimed_level") or 5)
+                    required  = int(sk_info.get("required_level") or 7)
+                    proven    = claimed if skipped else max(1, min(10, int(sc_entry.get("score") or claimed)))
+                    evidence  = "Not assessed in interview, inferred from resume." if skipped else "Scored from live interview answers."
+                    skills_out.append({
+                        "name":     sk_name,
+                        "claimed":  claimed,
+                        "current":  proven,
+                        "required": required,
+                        "evidence": evidence,
+                    })
+                    proven_scores.append(proven)
 
             # Weighted proof score: 50% proven skills avg, 30% domain fit, 20% experience baseline
-            avg_proven   = (sum(proven_scores) / len(proven_scores) * 10) if proven_scores else 50
-            proof_score  = int(min(92, max(40, avg_proven * 0.5 + 65 * 0.3 + 70 * 0.2)))
-            resume_score = int(min(92, max(40, sum(s["claimed"] for s in skills_out) / max(len(skills_out),1) * 10 * 0.5 + 65 * 0.3 + 70 * 0.2)))
+            # proven_scores are on a 1-10 scale; convert to 0-100 by multiplying by 10 *after* averaging
+            avg_proven_pct  = (sum(proven_scores) / len(proven_scores) * 10) if proven_scores else 50
+            proof_score     = int(min(98, max(10, avg_proven_pct * 0.5 + 65 * 0.3 + 70 * 0.2)))
+            avg_claimed_pct = (sum(s["claimed"] for s in skills_out) / max(len(skills_out), 1) * 10)
+            resume_score    = int(min(98, max(10, avg_claimed_pct * 0.5 + 65 * 0.3 + 70 * 0.2)))
 
             # Gaps = skills where proven < required, sorted by gap size
             gaps_sorted   = sorted(
@@ -1696,8 +1718,14 @@ elif st.session_state.phase == 2:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 fut_int  = executor.submit(_fetch_interview)
                 fut_road = executor.submit(_fetch_roadmap)
-                idata = fut_int.result()
-                rdata = fut_road.result()
+                try:
+                    idata = fut_int.result()
+                except Exception:
+                    idata = []
+                try:
+                    rdata = fut_road.result()
+                except Exception:
+                    rdata = []
 
             st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list, dict)) else []
             st.session_state.roadmap_data   = unwrap(rdata) if isinstance(rdata, (list, dict)) else []
@@ -1735,7 +1763,8 @@ elif st.session_state.phase == 2:
     cal_note  = fd.get("calibration_note", "")
 
     v_cls, v_lbl = verdict(score)
-    q_role = role.replace(" ", "%20")
+    from urllib.parse import quote as _urlencode
+    q_role = _urlencode(role, safe="")
 
     st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.62rem; color:#006b50; letter-spacing:0.14em; margin-bottom:20px;">⬡ ASSESSMENT COMPLETE — CALIBRATED REPORT BELOW</div>', unsafe_allow_html=True)
 
@@ -1803,7 +1832,7 @@ elif st.session_state.phase == 2:
             ("indeed",    "Indeed",         f"https://www.indeed.com/jobs?q={q_role}"),
             ("glassdoor", "Glassdoor",      f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q_role}"),
             ("google",    "Google Jobs",    f"https://www.google.com/search?q={q_role}+jobs+hiring"),
-            ("naukri",    "Naukri.com",     f"https://www.naukri.com/{q_role.replace('%20','-').lower()}-jobs"),
+            ("naukri",    "Naukri.com",     f"https://www.naukri.com/{q_role.replace('+','-').replace('%20','-').lower()}-jobs"),
             ("wellfound", "Wellfound",      f"https://wellfound.com/jobs?q={q_role}"),
         ]
         for key, label, url in platforms:
@@ -1960,7 +1989,7 @@ elif st.session_state.phase == 2:
         st.markdown('<div class="sp-section">Projected Readiness Curve</div>', unsafe_allow_html=True)
         st.plotly_chart(make_learning_curve(), use_container_width=True, config={"displayModeBar": False})
 
-        projected = 84
+        projected = min(98, score + max(10, int((100 - score) * 0.35)))
         gain = projected - score
         g_clr = "#34d399" if gain >= 0 else "#f87171"
         st.markdown(f"""
