@@ -6,6 +6,7 @@ import json
 import re
 import hashlib
 import time
+import concurrent.futures
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
@@ -1021,41 +1022,27 @@ HEX_SVG = """<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
 
 def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None = None):
     """
-    Display a full-screen animated loading overlay.
-    steps: list of (label, status) where status is "active"|"done"|"pending"
-    Returns the st.empty() placeholder so caller can clear it.
+    Loading overlay - uses single-line HTML concat to prevent Streamlit
+    from leaking closing tags when placeholder.empty() is called inside columns.
     """
     placeholder = st.empty()
     steps_html = ""
     if steps:
         for label, status in steps:
             icon = "✓" if status == "done" else ("→" if status == "active" else "·")
-            steps_html += f'''
-            <div class="sp-loader-step {status}">
-              <div class="sp-loader-step-dot"></div>
-              {icon} {label}
-            </div>'''
-
-    # Wrap in a single root div to prevent Streamlit from leaking closing tags
-    # on rerun when placeholder.empty() is called inside a column context
-    inner = f"""
-        <div class="sp-loader-hex">{HEX_SVG}</div>
-        <div class="sp-loader-title">{title}</div>
-        <div class="sp-loader-sub">{subtitle}</div>
-        <div class="sp-loader-dots">
-          <div class="sp-loader-dot"></div>
-          <div class="sp-loader-dot"></div>
-          <div class="sp-loader-dot"></div>
-        </div>
-        <div class="sp-loader-bar-wrap">
-          <div class="sp-loader-bar"></div>
-        </div>
-        {'<div class="sp-loader-steps">' + steps_html + '</div>' if steps_html else ''}"""
-
-    placeholder.markdown(
-        f'<div class="sp-loading-overlay"><div class="sp-loading-card">{inner}</div></div>',
-        unsafe_allow_html=True
+            steps_html += f'<div class="sp-loader-step {status}"><div class="sp-loader-step-dot"></div>{icon} {label}</div>'
+    steps_block = f'<div class="sp-loader-steps">{steps_html}</div>' if steps_html else ""
+    html = (
+        '<div class="sp-loading-overlay"><div class="sp-loading-card">'
+        + f'<div class="sp-loader-hex">{HEX_SVG}</div>'
+        + f'<div class="sp-loader-title">{title}</div>'
+        + f'<div class="sp-loader-sub">{subtitle}</div>'
+        + '<div class="sp-loader-dots"><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div></div>'
+        + '<div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>'
+        + steps_block
+        + '</div></div>'
     )
+    placeholder.markdown(html, unsafe_allow_html=True)
     return placeholder
 
 # ─────────────────────────────────────────────
@@ -1170,6 +1157,14 @@ def unwrap(data):
 
 
 # ─────────────────────────────────────────────
+#  PRE-SIDEBAR SESSION STATE
+# ─────────────────────────────────────────────
+if "assessment_history" not in st.session_state:
+    st.session_state.assessment_history = []
+if "viewing_history_idx" not in st.session_state:
+    st.session_state.viewing_history_idx = None
+
+# ─────────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
@@ -1208,46 +1203,48 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
-
-
     # ── Assessment History ──
     st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
-    st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; letter-spacing:0.12em; margin-bottom:10px;">── PAST ASSESSMENTS ──</div>', unsafe_allow_html=True)
-
+    st.markdown('<div style="font-family:Space Mono,monospace;font-size:0.6rem;color:#2a3a52;letter-spacing:0.12em;margin-bottom:8px;">── PAST ASSESSMENTS ──</div>', unsafe_allow_html=True)
     if st.session_state.get("assessment_history"):
-        for idx, entry in enumerate(st.session_state.assessment_history):
-            is_active = (st.session_state.get("viewing_history_idx") == idx and
-                         st.session_state.phase == 2)
-            score_val = entry["score"]
-            score_clr = "#34d399" if score_val >= 70 else "#fbbf24" if score_val >= 50 else "#f87171"
-            active_bg = "background:rgba(0,200,150,0.07); border:1px solid rgba(0,200,150,0.25);" if is_active else "background:#0d1220; border:1px solid rgba(255,255,255,0.05);"
-            role_short = entry["role"][:20] + ("..." if len(entry["role"]) > 20 else "")
+        for _hidx, _hentry in enumerate(st.session_state.assessment_history):
+            _is_active = (st.session_state.get("viewing_history_idx") == _hidx
+                          and st.session_state.get("phase", 0) == 2)
+            _sc = _hentry["score"]
+            _sc_clr = "#34d399" if _sc >= 70 else "#fbbf24" if _sc >= 50 else "#f87171"
+            _abg = "background:rgba(0,200,150,0.07);border:1px solid rgba(0,200,150,0.25);" if _is_active else "background:#0d1220;border:1px solid rgba(255,255,255,0.05);"
+            _rshort = _hentry["role"][:22] + ("…" if len(_hentry["role"]) > 22 else "")
             st.markdown(
-                f'<div style="border-radius:8px; padding:10px 12px; margin-bottom:8px; {active_bg}">'
-                f'<div style="font-family:Syne,sans-serif; font-size:0.78rem; font-weight:600; color:#dde4f0; margin-bottom:3px;">{role_short}</div>'
-                f'<div style="display:flex; align-items:center; gap:8px;">'
-                f'<span style="font-family:Space Mono,monospace; font-size:0.7rem; font-weight:700; color:{score_clr};">{score_val}%</span>'
-                f'<span style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52;">{entry["timestamp"]}</span>'
+                f'<div style="border-radius:8px;padding:9px 11px;margin-bottom:6px;{_abg}">'
+                f'<div style="font-family:Syne,sans-serif;font-size:0.76rem;font-weight:600;color:#dde4f0;margin-bottom:3px;">{_rshort}</div>'
+                f'<div style="display:flex;align-items:center;gap:8px;">'
+                f'<span style="font-family:Space Mono,monospace;font-size:0.7rem;font-weight:700;color:{_sc_clr};">{_sc}%</span>'
+                f'<span style="font-family:Space Mono,monospace;font-size:0.6rem;color:#2a3a52;">{_hentry["timestamp"]}</span>'
                 f'</div></div>',
                 unsafe_allow_html=True
             )
-            if st.button(f"↗ View report", key=f"hist_view_{idx}"):
-                # Restore this assessment's data into session state
-                st.session_state.final_data     = entry["final_data"]
-                st.session_state.interview_data = entry["interview_data"]
-                st.session_state.roadmap_data   = entry["roadmap_data"]
-                st.session_state.phase          = 2
-                st.session_state.viewing_history_idx = idx
+            if st.button(f"View report", key=f"hv_{_hidx}"):
+                st.session_state.final_data = _hentry["final_data"]
+                st.session_state.interview_data = _hentry["interview_data"]
+                st.session_state.roadmap_data = _hentry["roadmap_data"]
+                st.session_state.phase = 2
+                st.session_state.viewing_history_idx = _hidx
                 st.rerun()
-
-        if st.button("✕ Clear All History", key="clear_hist"):
+        if st.button("Clear All History", key="sp_clear_hist"):
             st.session_state.assessment_history = []
             st.session_state.viewing_history_idx = None
             st.rerun()
     else:
-        st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.62rem; color:#1a2535; text-align:center; padding:10px 0;">No assessments yet</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-family:Space Mono,monospace;font-size:0.62rem;color:#1a2535;text-align:center;padding:8px 0;">No assessments yet</div>', unsafe_allow_html=True)
 
+    st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style='font-family:Space Mono,monospace; font-size:0.55rem; color:#1a2535; text-align:center; line-height:1.8;'>
+      CATALYST HACKATHON 2025<br>
+      DECCAN AI EXPERTS<br>
+      QWEN · QWEN-PLUS
+    </div>
+    """, unsafe_allow_html=True)
     st.markdown("""
     <div style='font-family:Space Mono,monospace; font-size:0.55rem; color:#1a2535; text-align:center; line-height:1.8;'>
       CATALYST HACKATHON 2025<br>
@@ -1265,12 +1262,6 @@ for key in ["phase", "skill_plan", "probe_questions", "chat_history",
             "final_data", "interview_data", "roadmap_data"]:
     if key not in st.session_state:
         st.session_state[key] = None if key in ["skill_plan","probe_questions","final_data","interview_data","roadmap_data"] else ([] if key in ["chat_history","skill_scores"] else 0)
-
-# Assessment history — persists for the whole browser session
-if "assessment_history" not in st.session_state:
-    st.session_state.assessment_history = []
-if "viewing_history_idx" not in st.session_state:
-    st.session_state.viewing_history_idx = None
 
 if st.session_state.phase is None:
     st.session_state.phase = 0  # 0=input, 1=probing, 2=results
@@ -1430,26 +1421,21 @@ if st.session_state.phase == 0:
             depth_override = sel_mode["depth_override"]
             skill_limit    = sel_mode.get("skill_limit", 6)
 
-            _loader.markdown(f"""
-            <div class="sp-loading-overlay">
-              <div class="sp-loading-card">
-                <div class="sp-loader-hex">{HEX_SVG}</div>
-                <div class="sp-loader-title">Building your interview</div>
-                <div class="sp-loader-sub">generating calibrated questions</div>
-                <div class="sp-loader-dots">
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                </div>
-                <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
-                <div class="sp-loader-steps">
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Parsed resume &amp; JD</div>
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Extracted {len(skills)} critical skills</div>
-                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview questions</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            _loader.markdown(
+                '<div class="sp-loading-overlay"><div class="sp-loading-card">'
+                + f'<div class="sp-loader-hex">{HEX_SVG}</div>'
+                + '<div class="sp-loader-title">Building your interview</div>'
+                + '<div class="sp-loader-sub">generating calibrated questions</div>'
+                + '<div class="sp-loader-dots"><div class="sp-loader-dot"></div>'
+                  '<div class="sp-loader-dot"></div><div class="sp-loader-dot"></div></div>'
+                + '<div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>'
+                + '<div class="sp-loader-steps">'
+                + '<div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Parsed resume &amp; JD</div>'
+                + f'<div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Extracted {len(skills)} critical skills</div>'
+                + '<div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview questions</div>'
+                + '</div></div></div>',
+                unsafe_allow_html=True
+            )
 
             # Generate ALL skills' questions in ONE batched API call
             # Much faster than one call per skill
@@ -1727,15 +1713,33 @@ elif st.session_state.phase == 2:
             calibration = json.dumps(scored)
             skipped_note = f"Skills NOT assessed (candidate skipped): {', '.join(skipped)}" if skipped else "All skills assessed."
 
-            _final_ph = show_loading(
+            # Loading overlay
+            _final_ph = st.empty()
+            def _mk_ov(title, sub, s1, s2, s3):
+                _d = '<div class="sp-loader-dot"></div>'
+                _bar = '<div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>'
+                return (
+                    '<div class="sp-loading-overlay"><div class="sp-loading-card">'
+                    + f'<div class="sp-loader-hex">{HEX_SVG}</div>'
+                    + f'<div class="sp-loader-title">{title}</div>'
+                    + f'<div class="sp-loader-sub">{sub}</div>'
+                    + f'<div class="sp-loader-dots">{_d}{_d}{_d}</div>'
+                    + _bar
+                    + '<div class="sp-loader-steps">'
+                    + s1 + s2 + s3
+                    + '</div></div></div>'
+                )
+            _done  = lambda t: f'<div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ {t}</div>'
+            _act   = lambda t: f'<div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ {t}</div>'
+            _pend  = lambda t: f'<div class="sp-loader-step"><div class="sp-loader-step-dot"></div>· {t}</div>'
+
+            _final_ph.markdown(_mk_ov(
                 "Compiling your results",
-                "this takes 10–15 seconds · almost there",
-                steps=[
-                    ("Running calibrated analysis", "active"),
-                    ("Generating interview prep",   "pending"),
-                    ("Building 14-day roadmap",     "pending"),
-                ]
-            )
+                "analysing interview · building report",
+                _act("Calibrated analysis"), _pend("Interview prep"), _pend("14-day roadmap")
+            ), unsafe_allow_html=True)
+
+            # ── Step 1: Final analysis (dependency for steps 2+3) ──
             raw_final = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
                 jd=st.session_state["_jd"][:3000],
                 resume=st.session_state["_resume"][:2500],
@@ -1743,71 +1747,55 @@ elif st.session_state.phase == 2:
                 calibration=calibration,
                 skipped_note=skipped_note
             ))
-            st.session_state.final_data = parse_json(raw_final)
+            fd_result = parse_json(raw_final)
+            st.session_state.final_data = fd_result
 
-            _final_ph.markdown(
-                f'<div class="sp-loading-overlay"><div class="sp-loading-card">'
-                f'<div class="sp-loader-hex">{HEX_SVG}</div>'
-                f'<div class="sp-loader-title">Preparing interview prep</div>'
-                f'<div class="sp-loader-sub">crafting tailored questions &amp; answers</div>'
-                f'<div class="sp-loader-dots"><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div></div>'
-                f'<div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>'
-                f'<div class="sp-loader-steps">'
-                f'<div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Calibrated analysis complete</div>'
-                f'<div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview prep</div>'
-                f'<div class="sp-loader-step"><div class="sp-loader-step-dot"></div>· Building 14-day roadmap</div>'
-                f'</div></div></div>',
-                unsafe_allow_html=True
-            )
-            fd = st.session_state.final_data
-            raw_int = call_groq(None, INTERVIEW_PREP_PROMPT.format(
-                role=fd.get("role", "the role"),
-                gaps=", ".join(fd.get("top_gaps", []))
-            ))
-            idata = parse_json(raw_int)
-            st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list,dict)) else []
+            _final_ph.markdown(_mk_ov(
+                "Almost there…",
+                "interview prep + roadmap running in parallel",
+                _done("Calibrated analysis"), _act("Interview prep"), _act("14-day roadmap")
+            ), unsafe_allow_html=True)
 
-            _final_ph.markdown(
-                f'<div class="sp-loading-overlay"><div class="sp-loading-card">'
-                f'<div class="sp-loader-hex">{HEX_SVG}</div>'
-                f'<div class="sp-loader-title">One last thing...</div>'
-                f'<div class="sp-loader-sub">building your personalised roadmap</div>'
-                f'<div class="sp-loader-dots"><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div></div>'
-                f'<div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>'
-                f'<div class="sp-loader-steps">'
-                f'<div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Calibrated analysis complete</div>'
-                f'<div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Interview prep ready</div>'
-                f'<div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Building 14-day roadmap</div>'
-                f'</div></div></div>',
-                unsafe_allow_html=True
-            )
-            raw_road = call_groq(None, ROADMAP_PROMPT.format(
-                role=fd.get("role", "the role"),
-                gaps=", ".join(fd.get("top_gaps", [])),
-                strengths=", ".join(fd.get("strengths", []))
-            ))
-            rdata = parse_json(raw_road)
-            st.session_state.roadmap_data = unwrap(rdata) if isinstance(rdata, (list,dict)) else []
+            # ── Steps 2+3: Interview prep + Roadmap in PARALLEL ──
+            _role_v = fd_result.get("role", "the role")
+            _gaps_v = ", ".join(fd_result.get("top_gaps", []))
+            _str_v  = ", ".join(fd_result.get("strengths", []))
+
+            def _do_interview():
+                raw = call_groq(None, INTERVIEW_PREP_PROMPT.format(role=_role_v, gaps=_gaps_v))
+                idata = parse_json(raw)
+                return unwrap(idata) if isinstance(idata, (list, dict)) else []
+
+            def _do_roadmap():
+                raw = call_groq(None, ROADMAP_PROMPT.format(role=_role_v, gaps=_gaps_v, strengths=_str_v))
+                rdata = parse_json(raw)
+                return unwrap(rdata) if isinstance(rdata, (list, dict)) else []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _pool:
+                _f_int  = _pool.submit(_do_interview)
+                _f_road = _pool.submit(_do_roadmap)
+                st.session_state.interview_data = _f_int.result()
+                st.session_state.roadmap_data   = _f_road.result()
+
             _final_ph.empty()
 
             # ── Save to assessment history ──
             import datetime as _dt
-            _fd = st.session_state.final_data
-            _already_saved = (
-                st.session_state.assessment_history and
-                st.session_state.assessment_history[0].get("role") == _fd.get("role") and
-                st.session_state.assessment_history[0].get("score") == int(_fd.get("score", 0))
+            _fd2 = st.session_state.final_data
+            _already = (
+                bool(st.session_state.assessment_history) and
+                st.session_state.assessment_history[0].get("score") == int(_fd2.get("score", 0)) and
+                st.session_state.assessment_history[0].get("role") == _fd2.get("role", "")
             )
-            if not _already_saved:
-                _hist_entry = {
-                    "role":           _fd.get("role", "Assessment"),
-                    "score":          int(_fd.get("score", 0)),
+            if not _already:
+                st.session_state.assessment_history.insert(0, {
+                    "role":           _fd2.get("role", "Assessment"),
+                    "score":          int(_fd2.get("score", 0)),
                     "timestamp":      _dt.datetime.now().strftime("%d %b"),
                     "final_data":     st.session_state.final_data,
                     "interview_data": st.session_state.interview_data,
                     "roadmap_data":   st.session_state.roadmap_data,
-                }
-                st.session_state.assessment_history.insert(0, _hist_entry)
+                })
                 st.session_state.viewing_history_idx = 0
 
         except Exception as e:
