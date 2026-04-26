@@ -963,7 +963,6 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
     Display a full-screen animated loading overlay.
     steps: list of (label, status) where status is "active"|"done"|"pending"
     Returns the st.empty() placeholder so caller can clear it.
-    Call placeholder.empty() to dismiss — this also clears any residual HTML.
     """
     placeholder = st.empty()
     steps_html = ""
@@ -976,9 +975,6 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
               {icon} {label}
             </div>'''
 
-    # Wrap in a zero-height guardian div so Streamlit never renders stray closing tags
-    # if the placeholder is cleared mid-render. The overlay itself is position:fixed
-    # so the guardian wrapper is invisible to the user.
     placeholder.markdown(f"""<div style="height:0;overflow:hidden;line-height:0;font-size:0;">
     <div class="sp-loading-overlay">
       <div class="sp-loading-card">
@@ -1166,27 +1162,25 @@ with st.sidebar:
             timestamp   = entry.get("timestamp", "")
             score_clr   = "#34d399" if score_val >= 70 else "#fbbf24" if score_val >= 50 else "#f87171"
             is_active   = st.session_state.get("_viewing_history_id") == entry["id"]
-            # Visually distinct from sidebar bg (#070a14): use indigo-tinted dark card
-            # with a coloured left-border accent keyed to the score
-            bg     = "rgba(0,200,150,0.07)" if is_active else "rgba(20,24,52,0.98)"
-            border = f"1px solid {'#00c896' if is_active else 'rgba(99,102,241,0.22)'}"
+            bg     = "rgba(0,200,150,0.07)" if is_active else "rgba(18,22,48,0.98)"
+            border = "#00c896" if is_active else "rgba(99,102,241,0.25)"
             short_title = role_title[:26] + ("…" if len(role_title) > 26 else "")
 
             st.markdown(f"""
             <div style='background:{bg};
-                        border:{border};
+                        border:1px solid {border};
                         border-left:3px solid {score_clr};
                         border-radius:8px;
                         padding:10px 12px;
                         margin-bottom:6px;
-                        box-shadow:0 2px 8px rgba(0,0,0,0.4);'>
+                        box-shadow:0 2px 8px rgba(0,0,0,0.45);'>
               <div style='font-family:Syne,sans-serif; font-size:0.78rem; font-weight:600;
                           color:#d0dcf4; margin-bottom:5px; line-height:1.3;'
                    title='{role_title}'>{short_title}</div>
               <div style='display:flex; justify-content:space-between; align-items:center;'>
                 <span style='font-family:Space Mono,monospace; font-size:0.68rem;
-                             color:{score_clr}; font-weight:700;
-                             background:rgba(0,0,0,0.25); padding:1px 6px; border-radius:4px;'
+                             font-weight:700; color:{score_clr};
+                             background:rgba(0,0,0,0.3); padding:1px 7px; border-radius:4px;'
                 >{score_val}%</span>
                 <span style='font-family:Space Mono,monospace; font-size:0.54rem;
                              color:#3a4a62;'>{timestamp}</span>
