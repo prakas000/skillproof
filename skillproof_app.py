@@ -824,14 +824,22 @@ Return JSON only:
   }}
 ]"""
 
-ROADMAP_PROMPT = """Create a 14-day upskilling roadmap.
+ROADMAP_PROMPT = """Create a 14-day personalised upskilling roadmap.
 Role: '{role}'. Proven weak areas from live interview: {gaps}.
+Candidate proven strengths (use for adjacency reasoning): {strengths}.
+
+Prioritise skills by adjacency - how close each gap skill is to what the candidate already knows.
+High adjacency skills come first (faster wins). Low adjacency skills come later.
+
+Each day must include a realistic time estimate (most people have 1-2 hrs/day).
 
 Return JSON only:
 [
   {{
     "day": 1,
     "topic": "<specific topic>",
+    "hours": 1.5,
+    "adjacency_note": "<on day 1 of each new skill block: one sentence on why prioritised. null for continuation days>",
     "activities": ["<activity 1>", "<activity 2>"],
     "resources": [
       {{"label": "<platform: title>", "url": "<real URL>", "type": "video|doc|course|github"}}
@@ -1196,27 +1204,32 @@ elif st.session_state.phase == 1:
 
         # Render chat history
         if st.session_state.chat_history:
-            st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
             for msg in st.session_state.chat_history:
+                content = re.sub(r"<[^>]+>", "", str(msg.get("content", ""))).strip()
                 if msg["role"] == "agent":
-                    st.markdown(f"""
-                    <div class="bubble agent">
-                      <div class="bubble-avatar">SP</div>
-                      <div class="bubble-body">
-                        {'<div class="bubble-skill-tag">PROBING: ' + msg.get("skill","") + '</div>' if msg.get("skill") else ''}
-                        {msg["content"]}
-                        {('<div style="font-size:0.72rem; color:#006b50; margin-top:8px; font-family:Space Mono,monospace;">Signal: ' + msg.get("signal","").upper() + ' · Score: ' + str(msg.get("score","")) + '/10</div>') if msg.get("score") else ''}
-                      </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    skill_tag = ""
+                    if msg.get("skill"):
+                        skill_tag = f'<div class="bubble-skill-tag">PROBING: {msg["skill"]}</div>'
+                    score_tag = ""
+                    if msg.get("score"):
+                        sig = str(msg.get("signal", "")).upper()
+                        sc  = str(msg.get("score", ""))
+                        score_tag = f'<div style="font-size:0.72rem;color:#006b50;margin-top:8px;font-family:Space Mono,monospace;">Signal: {sig} · Score: {sc}/10</div>'
+                    st.markdown(
+                        f'<div class="bubble agent">'
+                        f'<div class="bubble-avatar">SP</div>'
+                        f'<div class="bubble-body">{skill_tag}{content}{score_tag}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
                 else:
-                    st.markdown(f"""
-                    <div class="bubble user">
-                      <div class="bubble-avatar">YOU</div>
-                      <div class="bubble-body">{msg["content"]}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="bubble user">'
+                        f'<div class="bubble-avatar">YOU</div>'
+                        f'<div class="bubble-body">{content}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
 
         # Ask current question
         if qi < total_q_this_skill:
@@ -1225,17 +1238,16 @@ elif st.session_state.phase == 1:
             q_type = current_q.get("type", "")
 
             # Show the question as an agent bubble (not yet in history)
-            st.markdown(f"""
-            <div class="chat-wrap">
-              <div class="bubble agent">
-                <div class="bubble-avatar">SP</div>
-                <div class="bubble-body">
-                  <div class="bubble-skill-tag">PROBING: {skill["name"]} · {q_type}</div>
-                  {q_text}
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            q_safe = re.sub(r"<[^>]+>", "", q_text).strip()
+            st.markdown(
+                f'<div class="bubble agent">'
+                f'<div class="bubble-avatar">SP</div>'
+                f'<div class="bubble-body">'
+                f'<div class="bubble-skill-tag">PROBING: {skill["name"]} · {q_type}</div>'
+                f'{q_safe}'
+                f'</div></div>',
+                unsafe_allow_html=True
+            )
 
             answer = st.text_area(
                 "Your answer",
@@ -1351,7 +1363,8 @@ elif st.session_state.phase == 2:
             with st.spinner("⬡  Building 14-day roadmap..."):
                 raw_road = call_groq(client, ROADMAP_PROMPT.format(
                     role=fd.get("role", "the role"),
-                    gaps=", ".join(fd.get("top_gaps", []))
+                    gaps=", ".join(fd.get("top_gaps", [])),
+                    strengths=", ".join(fd.get("strengths", []))
                 ))
                 rdata = parse_json(raw_road)
                 st.session_state.roadmap_data = unwrap(rdata) if isinstance(rdata, (list,dict)) else []
@@ -1515,7 +1528,7 @@ elif st.session_state.phase == 2:
 
     # ROW 4: Interview Prep
     st.markdown('<div class="sp-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sp-section">Interview Preparation — 8 Q&As Based on Your Proven Gaps</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sp-section">Interview Preparation - 8 Q&As Based on Your Proven Gaps</div>', unsafe_allow_html=True)
     idata = st.session_state.interview_data or []
     if isinstance(idata, list) and idata:
         for i in range(0, min(len(idata), 8), 2):
@@ -1524,16 +1537,22 @@ elif st.session_state.phase == 2:
                 idx = i + j
                 if idx < len(idata):
                     item = idata[idx]
+                    q_type = re.sub(r"<[^>]+>", "", str(item.get("type", ""))).strip()
+                    q_text = re.sub(r"<[^>]+>", "", str(item.get("q", ""))).strip()
+                    a_text = re.sub(r"<[^>]+>", "", str(item.get("a", ""))).strip()
+                    tip    = re.sub(r"<[^>]+>", "", str(item.get("tip", ""))).strip()
+                    tip_html = f'<div class="iq-tip">💡 {tip}</div>' if tip else ""
                     with col:
-                        st.markdown(f"""
-                        <div class="iq-card">
-                          <div class="iq-meta">Q{idx+1} · {item.get("type","")}</div>
-                          <div class="iq-q">{item.get("q","")}</div>
-                          <div class="iq-alabel">Model Answer</div>
-                          <div class="iq-a">{item.get("a","")}</div>
-                          {'<div class="iq-tip">💡 ' + item.get("tip","") + '</div>' if item.get("tip") else ''}
-                        </div>
-                        """, unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="iq-card">'
+                            f'<div class="iq-meta">Q{idx+1} · {q_type}</div>'
+                            f'<div class="iq-q">{q_text}</div>'
+                            f'<div class="iq-alabel">Model Answer</div>'
+                            f'<div class="iq-a">{a_text}</div>'
+                            f'{tip_html}'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
     else:
         st.warning("Interview prep unavailable.")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1543,8 +1562,10 @@ elif st.session_state.phase == 2:
 
     with col_road:
         st.markdown('<div class="sp-card">', unsafe_allow_html=True)
-        st.markdown('<div class="sp-section">14-Day Accelerated Roadmap — Targeting Proven Gaps</div>', unsafe_allow_html=True)
+        # total hours summary
         rdata = st.session_state.roadmap_data or []
+        total_hours = sum(d.get("hours", 1.5) for d in rdata[:14])
+        st.markdown(f'<div class="sp-section">14-Day Adjacency-Prioritised Roadmap <span style="font-size:0.65rem; color:#2a3a52; font-weight:400; letter-spacing:0;">· {total_hours:.0f} hrs total · ~{total_hours/14:.1f} hrs/day</span></div>', unsafe_allow_html=True)
         type_icons = {"video": "▶", "course": "🎓", "doc": "📖", "book": "📚", "github": "⬡"}
         if isinstance(rdata, list) and rdata:
             for d in rdata[:14]:
@@ -1552,10 +1573,14 @@ elif st.session_state.phase == 2:
                     f'<a href="{r.get("url","#")}" target="_blank">{type_icons.get(r.get("type",""),"🔗")} {r.get("label","Resource")}</a>'
                     for r in d.get("resources", [])
                 )
+                adj = d.get("adjacency_note")
+                adj_html = f'<div style="font-size:0.72rem; color:#00956e; font-style:italic; margin-bottom:3px;">↳ {adj}</div>' if adj and adj != "null" else ""
+                hours = d.get("hours", 1.5)
                 st.markdown(f"""
                 <div class="rm-day">
-                  <div class="rm-badge">D{d.get("day","?")}</div>
+                  <div class="rm-badge">D{d.get("day","?")}<br><span style="font-size:0.55rem; color:#006b50;">{hours}h</span></div>
                   <div>
+                    {adj_html}
                     <div class="rm-topic">{d.get("topic","")}</div>
                     <div class="rm-act">{" · ".join(d.get("activities",[]))}</div>
                     <div class="rm-res" style="margin-top:6px;">{res_html}</div>
