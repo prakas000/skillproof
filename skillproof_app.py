@@ -507,6 +507,7 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
 .cal-green { color: #00c896; }
 .cal-amber { color: #fbbf24; }
 .cal-red   { color: #f87171; }
+.cal-skip  { color: #2a3a52; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1297,12 +1298,20 @@ elif st.session_state.phase == 1:
         if st.session_state.skill_scores:
             st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; letter-spacing:0.1em; margin-bottom:8px;">CALIBRATED SO FAR</div>', unsafe_allow_html=True)
             for sc in st.session_state.skill_scores:
-                signal_cls = "cal-green" if sc["score"] >= 7 else ("cal-amber" if sc["score"] >= 5 else "cal-red")
+                sc_score = sc.get("score")
+                if sc_score is None:
+                    signal_cls = "cal-skip"
+                elif sc_score >= 7:
+                    signal_cls = "cal-green"
+                elif sc_score >= 5:
+                    signal_cls = "cal-amber"
+                else:
+                    signal_cls = "cal-red"
                 st.markdown(f"""
                 <div class="calibration-bar">
                   <span class="cal-icon">⬡</span>
                   <span class="cal-label">{sc["skill"]}</span>
-                  <span class="cal-score {signal_cls}">{sc["score"]}/10</span>
+                  <span class="cal-score {signal_cls}">{sc_score if sc_score is not None else "—"}/10</span>
                 </div>
                 """, unsafe_allow_html=True)
 
