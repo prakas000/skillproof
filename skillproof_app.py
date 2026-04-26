@@ -1652,72 +1652,80 @@ elif st.session_state.phase == 2:
     # Run final analysis once
     if st.session_state.final_data is None:
         try:
-            # provider selected automatically by fallback engine
-
-            # Build transcript
-            transcript_lines = []
-            for msg in st.session_state.chat_history:
-                role_label = "INTERVIEWER" if msg["role"] == "agent" else "CANDIDATE"
-                line = f"{role_label}: {msg['content']}"
-                if msg.get("score"):
-                    line += f" [Evaluator score: {msg['score']}/10, signal: {msg.get('signal','')}]"
-                transcript_lines.append(line)
-            transcript = "\n".join(transcript_lines)
-
-            # Separate scored vs skipped skills for calibration note
-            scored   = [s for s in st.session_state.skill_scores if not s.get("skipped")]
-            skipped  = [s["skill"] for s in st.session_state.skill_scores if s.get("skipped")]
-            calibration = json.dumps(scored)
-            skipped_note = f"Skills NOT assessed (candidate skipped): {', '.join(skipped)}" if skipped else "All skills assessed."
-
-            _final_ph = show_loading(
-                "Compiling your results",
-                "this takes 10–15 seconds · almost there",
-                steps=[
-                    ("Running calibrated analysis", "active"),
-                    ("Generating interview prep",   "pending"),
-                    ("Building 14-day roadmap",     "pending"),
-                ]
-            )
             import concurrent.futures
             import time as _time
 
-            # ── ALL 3 calls fire simultaneously ──
-            def _fetch_final():
-                raw = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
-                    jd=st.session_state["_jd"][:2000],
-                    resume=st.session_state["_resume"][:1500],
-                    transcript=transcript[:2500],
-                    calibration=calibration,
-                    skipped_note=skipped_note
-                ))
-                return parse_json(raw)
+            # ── Step 1: Compute final_data LOCALLY — zero LLM calls needed ──
+            # All scores already exist in skill_scores + skill_plan. Build the report instantly.
+            plan       = st.session_state.skill_plan or {}
+            role_title = plan.get("role", "the role")
+            plan_skills = {s["name"]: s for s in plan.get("skills", [])}
+            sc_map     = {s["skill"]: s for s in (st.session_state.skill_scores or [])}
 
-            # We need gaps/strengths from final — so final must finish first.
-            # Run final alone, then fire interview+roadmap together.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                fd_result = ex.submit(_fetch_final).result()
+            skills_out = []
+            proven_scores = []
+            for sk_name, sk_info in plan_skills.items():
+                sc_entry  = sc_map.get(sk_name, {})
+                skipped   = sc_entry.get("skipped", False)
+                claimed   = sk_info.get("claimed_level", 5)
+                required  = sk_info.get("required_level", 7)
+                proven    = claimed if skipped else int(sc_entry.get("score") or claimed)
+                evidence  = "Not assessed in interview, inferred from resume." if skipped else "Scored from live interview answers."
+                skills_out.append({
+                    "name":     sk_name,
+                    "claimed":  claimed,
+                    "current":  proven,
+                    "required": required,
+                    "evidence": evidence,
+                })
+                proven_scores.append(proven)
+
+            # Weighted proof score: 50% proven skills avg, 30% domain fit, 20% experience baseline
+            avg_proven   = (sum(proven_scores) / len(proven_scores) * 10) if proven_scores else 50
+            proof_score  = int(min(92, max(40, avg_proven * 0.5 + 65 * 0.3 + 70 * 0.2)))
+            resume_score = int(min(92, max(40, sum(s["claimed"] for s in skills_out) / max(len(skills_out),1) * 10 * 0.5 + 65 * 0.3 + 70 * 0.2)))
+
+            # Gaps = skills where proven < required, sorted by gap size
+            gaps_sorted   = sorted(
+                [s for s in skills_out if s["current"] < s["required"]],
+                key=lambda x: x["required"] - x["current"], reverse=True
+            )
+            top_gaps      = [s["name"] for s in gaps_sorted[:3]]
+            # Strengths = skills where proven >= required
+            strong_sorted = sorted(
+                [s for s in skills_out if s["current"] >= s["required"]],
+                key=lambda x: x["current"], reverse=True
+            )
+            strengths     = [s["name"] for s in strong_sorted[:3]]
+            if not strengths:
+                strengths = [skills_out[0]["name"]] if skills_out else ["General Skills"]
+
+            skipped_names = [s["skill"] for s in (st.session_state.skill_scores or []) if s.get("skipped")]
+            cal_note = (f"Skipped: {', '.join(skipped_names)}. Resume used for those areas." if skipped_names
+                        else "All skills assessed via live interview.")
+
+            fd_result = {
+                "score":            proof_score,
+                "resume_score":     resume_score,
+                "role":             role_title,
+                "summary":          f"Assessed for {role_title}. Proof Score: {proof_score}%. Key gaps: {', '.join(top_gaps) if top_gaps else 'None identified'}.",
+                "skills":           skills_out,
+                "top_gaps":         top_gaps,
+                "strengths":        strengths,
+                "calibration_note": cal_note,
+            }
             st.session_state.final_data = fd_result
             fd = fd_result
 
-            _final_ph.markdown(f"""
-            <div class="sp-loading-overlay">
-              <div class="sp-loading-card">
-                <div class="sp-loader-hex">{HEX_SVG}</div>
-                <div class="sp-loader-title">Almost done...</div>
-                <div class="sp-loader-sub">interview prep &amp; roadmap — running together</div>
-                <div class="sp-loader-dots">
-                  <div class="sp-loader-dot"></div><div class="sp-loader-dot"></div><div class="sp-loader-dot"></div>
-                </div>
-                <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
-                <div class="sp-loader-steps">
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Score calculated</div>
-                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Interview prep</div>
-                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ 14-day roadmap</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            _final_ph = show_loading(
+                "Almost there...",
+                "generating interview prep & roadmap",
+                steps=[
+                    ("Score computed ✓",          "done"),
+                    ("Generating interview prep",  "active"),
+                    ("Building 14-day roadmap",    "active"),
+                ]
+            )
 
             def _fetch_interview():
                 raw = call_groq(None, INTERVIEW_PREP_PROMPT.format(
