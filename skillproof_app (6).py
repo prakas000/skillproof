@@ -939,10 +939,19 @@ Generate 6 interview Q&As (2 conceptual, 3 technical, 1 behavioural).
 Return JSON only — no preamble:
 [{{"num":1,"type":"Conceptual","q":"<question>","a":"<1-2 sentence answer>","tip":"<one tip>"}}]"""
 
-ROADMAP_PROMPT = """14-day upskilling roadmap. Role: '{role}'. Gaps: {gaps}. Strengths: {strengths}.
-Adjacency order: skills closest to strengths first. 1-2 hrs/day realistic.
-CRITICAL: Return raw JSON only — no preamble, no markdown, no backticks. All string values must be plain text with no markdown formatting (no bold, no underscores, no asterisks). URLs must be plain URLs with no surrounding underscores or markdown.
-[{{"day":1,"topic":"<topic>","hours":1.5,"adjacency_note":"<why first or null>","activities":["<act1>","<act2>"],"resources":[{{"label":"<platform: title>","url":"<plain_url>","type":"video|course|doc"}}]}}]"""
+ROADMAP_PROMPT = """You are generating a 14-day upskilling roadmap.
+Role: '{role}'. Skill gaps: {gaps}. Strengths: {strengths}.
+
+OUTPUT RULES — read carefully:
+- Respond with a JSON ARRAY only. Start with [ and end with ].
+- Do NOT wrap in an object. Do NOT add text before or after the array.
+- No markdown, no code fences, no underscores around URLs.
+- Keep ALL strings short (under 60 chars). Use plain URLs only.
+- Exactly 1 resource object per day. 2 activities per day.
+- Output all 14 days.
+
+Format (repeat for days 1-14):
+[{"day":1,"topic":"Short Topic","hours":1.5,"adjacency_note":null,"activities":["Act 1","Act 2"],"resources":[{"label":"Site: Title","url":"https://example.com","type":"course"}]},{"day":2,"topic":"Short Topic","hours":1.5,"adjacency_note":"builds on day 1","activities":["Act 1","Act 2"],"resources":[{"label":"Site: Title","url":"https://example.com","type":"doc"}]}]"""
 
 
 # ─────────────────────────────────────────────
@@ -1126,28 +1135,53 @@ def parse_json(raw: str):
         except Exception:
             return None
 
+    def salvage_array(s):
+        """Extract all complete {...} objects from a truncated/broken array."""
+        objects = []
+        depth = 0
+        start = None
+        for i, ch in enumerate(s):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start is not None:
+                    try:
+                        obj = json.loads(s[start:i+1])
+                        objects.append(_strip_md_artifacts(obj))
+                    except Exception:
+                        pass
+                    start = None
+        return objects if objects else None
+
     # Pass 1: raw as-is
     r = try_parse(raw)
     if r is not None: return r
 
-    # Pass 2: clean markdown artifacts
+    # Pass 2: clean __ markdown artifacts
     cleaned = _fix_llm_json(raw)
     r = try_parse(cleaned)
     if r is not None: return r
 
-    # Pass 3: extract array or object block
+    # Pass 3: extract outermost array or object
     for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
         m = re.search(pattern, cleaned)
         if not m: continue
         r = try_parse(m.group(1))
         if r is not None: return r
-        # Pass 4: truncated — salvage up to last complete bracket
+        # Pass 4: truncated — walk back to last valid closing bracket
         frag = m.group(1)
         for ch in (']', '}'):
             last = frag.rfind(ch)
             if last > 0:
                 r = try_parse(frag[:last + 1])
                 if r is not None: return r
+
+    # Pass 5: last resort — salvage every complete object individually
+    r = salvage_array(cleaned)
+    if r: return r
 
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
 
@@ -1751,14 +1785,20 @@ elif st.session_state.phase == 2:
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
-                ), max_tokens=6000)
+                ), max_tokens=8000)
                 return parse_json(raw)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 fut_int  = executor.submit(_fetch_interview)
                 fut_road = executor.submit(_fetch_roadmap)
-                idata = fut_int.result()
-                rdata = fut_road.result()
+                try:
+                    idata = fut_int.result(timeout=90)
+                except Exception as e:
+                    idata = []
+                try:
+                    rdata = fut_road.result(timeout=90)
+                except Exception as e:
+                    rdata = []
 
             st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list, dict)) else []
             st.session_state.roadmap_data   = unwrap(rdata) if isinstance(rdata, (list, dict)) else []
