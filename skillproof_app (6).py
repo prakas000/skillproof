@@ -1099,13 +1099,18 @@ def _strip_md_artifacts(obj):
 def parse_json(raw: str):
     if not raw:
         raise ValueError("Empty response.")
+    # Pre-strip __ markdown bold markers that the LLM injects into URLs/values.
+    # These can span newlines: "__https://...\n__ " so handle both cases upfront.
+    raw = re.sub(r'__\s*\n\s*__', ' ', raw)
+    raw = re.sub(r'__', '', raw)
     def clean(s):
         s = re.sub(r"```json\s*", "", s)
         s = re.sub(r"```\s*", "", s)
-        s = re.sub(r",\s*([\}\]])", r"\1", s)
-        # Strip markdown bold/italic wrapping from URLs inside JSON strings
-        s = re.sub(r'"__([^"]*?)__"', r'"\1"', s)
-        s = re.sub(r'"_([^"]*?)_"', r'"\1"', s)
+        # Remove __ markdown bold markers that may span newlines inside JSON
+        # e.g. "__https://example.com/\n__ next" or "url": "__https://...__"
+        s = re.sub(r'__\s*\n\s*__', ' ', s)   # __ \n __ across lines -> space
+        s = re.sub(r'__', '', s)               # remove all remaining __ pairs/singles
+        s = re.sub(r",\s*([\}\]])", r"\1", s)  # trailing commas
         return s.strip()
 
     def try_parse(s):
