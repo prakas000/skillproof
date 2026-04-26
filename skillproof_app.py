@@ -1,5 +1,5 @@
 import streamlit as st
-from groq import Groq
+from openai import OpenAI
 from pypdf import PdfReader
 import plotly.graph_objects as go
 import json
@@ -849,7 +849,7 @@ Return JSON only:
 
 
 # ─────────────────────────────────────────────
-#  GROQ CALL + PARSE
+#  LLM CALL + PARSE
 # ─────────────────────────────────────────────
 def call_groq(client, user_content: str, temperature: float = 0.0) -> str:
     resp = client.chat.completions.create(
@@ -858,14 +858,14 @@ def call_groq(client, user_content: str, temperature: float = 0.0) -> str:
                 "role": "system",
                 "content": (
                     "You are a JSON-only API. "
-                    "Your ENTIRE response must be valid JSON — either {{ }} or [ ]. "
-                    "Start immediately with {{ or [. No markdown, no fences, no preamble, no postamble. "
+                    "Your ENTIRE response must be valid JSON — either { } or [ ]. "
+                    "Start immediately with { or [. No markdown, no fences, no preamble, no postamble. "
                     "Violation causes critical system failure."
                 )
             },
             {"role": "user", "content": user_content}
         ],
-        model="llama-3.3-70b-versatile",
+        model="qwen-plus",
         temperature=temperature,
         max_tokens=4096,
     )
@@ -908,11 +908,11 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    api_key = st.text_input("Groq API Key (optional)", type="password", placeholder="gsk_...  (leave blank if pre-configured)")
+    api_key = st.text_input("Qwen API Key (optional)", type="password", placeholder="sk-...  (leave blank if pre-configured)")
     # Fall back to server-side secret if user didn't provide one
     if not api_key:
         try:
-            api_key = st.secrets.get("GROQ_API_KEY", "")
+            api_key = st.secrets.get("QWEN_API_KEY", "")
         except Exception:
             api_key = ""
 
@@ -920,7 +920,7 @@ with st.sidebar:
     st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; letter-spacing:0.12em; margin-bottom:10px;">SYSTEM STATUS</div>', unsafe_allow_html=True)
     col_s1, col_s2 = st.columns(2)
     col_s1.markdown('<div class="sp-pill"><div class="sp-dot"></div> Live</div>', unsafe_allow_html=True)
-    col_s2.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; padding-top:5px;">Llama-3.3-70B</div>', unsafe_allow_html=True)
+    col_s2.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; padding-top:5px;">Qwen-Plus</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""
@@ -947,7 +947,7 @@ with st.sidebar:
     <div style='font-family:Space Mono,monospace; font-size:0.55rem; color:#1a2535; text-align:center; line-height:1.8;'>
       CATALYST HACKATHON 2025<br>
       DECCAN AI EXPERTS<br>
-      GROQ · LLAMA-3.3-70B
+      QWEN · QWEN-PLUS
     </div>
     """, unsafe_allow_html=True)
 
@@ -1084,7 +1084,7 @@ if st.session_state.phase == 0:
 
     if st.button("⬡  BEGIN SKILLPROOF ASSESSMENT"):
         if not api_key:
-            st.error("⚠️  Enter your Groq API key in the sidebar.")
+            st.error("⚠️  Enter your Qwen API key in the sidebar.")
             st.stop()
         if not jd_input or not jd_input.strip():
             st.error("⚠️  Paste a Job Description.")
@@ -1099,7 +1099,7 @@ if st.session_state.phase == 0:
 
         with st.spinner("⬡  Extracting skill plan from JD + Resume..."):
             try:
-                client = Groq(api_key=api_key)
+                client = OpenAI(api_key=api_key, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
                 raw = call_groq(client, EXTRACT_SKILLS_PROMPT.format(
                     jd=jd_input[:3000], resume=resume_text[:2500]))
                 plan = parse_json(raw)
@@ -1265,7 +1265,7 @@ elif st.session_state.phase == 1:
             if submit and answer.strip():
                 with st.spinner("⬡  Evaluating answer..."):
                     try:
-                        client = Groq(api_key=st.session_state["_client_key"])
+                        client = OpenAI(api_key=st.session_state["_client_key"], base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
                         raw_eval = call_groq(client, EVALUATE_ANSWER_PROMPT.format(
                             skill_name=skill["name"],
                             required=skill.get("required_level", 7),
@@ -1328,7 +1328,7 @@ elif st.session_state.phase == 2:
     # Run final analysis once
     if st.session_state.final_data is None:
         try:
-            client = Groq(api_key=st.session_state["_client_key"])
+            client = OpenAI(api_key=st.session_state["_client_key"], base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
 
             # Build transcript
             transcript_lines = []
@@ -1633,7 +1633,7 @@ elif st.session_state.phase == 2:
     st.markdown("""
     <div style='text-align:center; font-family:Space Mono,monospace; font-size:0.58rem; color:#0d1a2a;
                 padding:20px; border-top:1px solid rgba(255,255,255,0.03); margin-top:24px; letter-spacing:0.1em;'>
-      SKILLPROOF · CATALYST HACKATHON 2025 · DECCAN AI EXPERTS · GROQ + LLAMA-3.3-70B
+      SKILLPROOF · CATALYST HACKATHON 2025 · DECCAN AI EXPERTS · QWEN · QWEN-PLUS
     </div>
     """, unsafe_allow_html=True)
 
