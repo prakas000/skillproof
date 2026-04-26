@@ -1351,96 +1351,59 @@ if st.session_state.phase == 0:
             st.error("⚠️  Could not extract PDF text. Ensure it is not a scanned image.")
             st.stop()
 
-        _loader = show_loading(
-            "Analysing your profile",
-            "reading resume · mapping skills · preparing questions",
-            steps=[
-                ("Parsing resume & JD", "active"),
-                ("Extracting critical skills", "pending"),
-                ("Preparing interview questions", "pending"),
-            ]
-        )
-        try:
-            # provider selected automatically by fallback engine
-            raw = call_groq(None, EXTRACT_SKILLS_PROMPT.format(
-                jd=jd_input[:3000], resume=resume_text[:2500]))
-            plan = parse_json(raw)
-            skills = plan.get("skills", [])
+        with st.spinner("Analysing your profile and building interview questions..."):
+            try:
+                raw = call_groq(None, EXTRACT_SKILLS_PROMPT.format(
+                    jd=jd_input[:3000], resume=resume_text[:2500]))
+                plan = parse_json(raw)
+                skills = plan.get("skills", [])
 
-            # Resolve probe mode settings
-            sel_mode       = PROBE_MODES[st.session_state.probe_mode]
-            q_per_skill    = sel_mode["q_per_skill"]
-            depth_override = sel_mode["depth_override"]
-            skill_limit    = sel_mode.get("skill_limit", 6)
+                sel_mode       = PROBE_MODES[st.session_state.probe_mode]
+                q_per_skill    = sel_mode["q_per_skill"]
+                depth_override = sel_mode["depth_override"]
+                skill_limit    = sel_mode.get("skill_limit", 6)
 
-            _loader.markdown(f"""
-            <div class="sp-loading-overlay">
-              <div class="sp-loading-card">
-                <div class="sp-loader-hex">{HEX_SVG}</div>
-                <div class="sp-loader-title">Building your interview</div>
-                <div class="sp-loader-sub">generating calibrated questions</div>
-                <div class="sp-loader-dots">
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                  <div class="sp-loader-dot"></div>
-                </div>
-                <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
-                <div class="sp-loader-steps">
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Parsed resume &amp; JD</div>
-                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Extracted {len(skills)} critical skills</div>
-                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview questions</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+                all_probes = []
+                skills_subset = skills[:skill_limit]
+                skills_info = json.dumps([
+                    {
+                        "name": sk["name"],
+                        "claimed": sk.get("claimed_level", 5),
+                        "required": sk.get("required_level", 7),
+                        "depth": depth_override or sk.get("probe_depth", "intermediate")
+                    }
+                    for sk in skills_subset
+                ])
+                batch_prompt = BATCH_PROBE_PROMPT.format(
+                    role=plan.get("role", "the role"),
+                    q_per_skill=q_per_skill,
+                    skills_json=skills_info
+                )
+                raw_batch = call_groq(None, batch_prompt)
+                batch_result = parse_json(raw_batch)
+                if isinstance(batch_result, dict):
+                    batch_result = next(iter(batch_result.values()), [])
+                for entry in batch_result:
+                    skill_name = entry.get("skill_name", "")
+                    sk = next((s for s in skills_subset if s["name"] == skill_name), None)
+                    if sk is None and skills_subset:
+                        sk = skills_subset[len(all_probes) % len(skills_subset)]
+                    qs = entry.get("questions", [])
+                    if sk and qs:
+                        all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
 
-            # Generate ALL skills' questions in ONE batched API call
-            # Much faster than one call per skill
-            all_probes = []
-            skills_subset = skills[:skill_limit]
-            skills_info = json.dumps([
-                {
-                    "name": sk["name"],
-                    "claimed": sk.get("claimed_level", 5),
-                    "required": sk.get("required_level", 7),
-                    "depth": depth_override or sk.get("probe_depth", "intermediate")
-                }
-                for sk in skills_subset
-            ])
-            batch_prompt = BATCH_PROBE_PROMPT.format(
-                role=plan.get("role", "the role"),
-                q_per_skill=q_per_skill,
-                skills_json=skills_info
-            )
-            raw_batch = call_groq(None, batch_prompt)
-            batch_result = parse_json(raw_batch)
-            if isinstance(batch_result, dict):
-                batch_result = next(iter(batch_result.values()), [])
-            # batch_result is a list of {skill_name, questions:[{q, type}]}
-            for entry in batch_result:
-                skill_name = entry.get("skill_name", "")
-                # Find matching skill object
-                sk = next((s for s in skills_subset if s["name"] == skill_name), None)
-                if sk is None and skills_subset:
-                    sk = skills_subset[len(all_probes) % len(skills_subset)]
-                qs = entry.get("questions", [])
-                if sk and qs:
-                    all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
-
-            _loader.empty()
-            st.session_state.skill_plan   = plan
-            st.session_state.probe_questions = all_probes
-            st.session_state.chat_history = []
-            st.session_state.current_skill_idx = 0
-            st.session_state.current_q_idx     = 0
-            st.session_state.skill_scores = []
-            st.session_state["_jd"]     = jd_input
-            st.session_state["_resume"] = resume_text
-            st.session_state.phase = 1
-            st.rerun()
-        except Exception as e:
-            _loader.empty()
-            st.error(f"❌  Skill extraction failed: {e}")
+                st.session_state.skill_plan      = plan
+                st.session_state.probe_questions = all_probes
+                st.session_state.chat_history    = []
+                st.session_state.current_skill_idx = 0
+                st.session_state.current_q_idx     = 0
+                st.session_state.skill_scores      = []
+                st.session_state["_jd"]            = jd_input
+                st.session_state["_resume"]        = resume_text
+                st.session_state.phase             = 1
+            except Exception as e:
+                st.error(f"❌  Skill extraction failed: {e}")
+        st.rerun()
 
 
 # ═══════════════════════════════════════════
@@ -1574,50 +1537,45 @@ elif st.session_state.phase == 1:
                 skip = st.button("Skip →", key=f"skip_{si}_{qi}")
 
             if submit and answer.strip():
-                _eval_ph = show_loading(
-                    "Hold on a moment",
-                    "reading your answer · calibrating score",
-                )
-                try:
-                    raw_eval = call_groq(None, EVALUATE_ANSWER_PROMPT.format(
-                        skill_name=skill["name"],
-                        required=skill.get("required_level", 7),
-                        claimed=skill.get("claimed_level", 5),
-                        question=q_text,
-                        answer=answer.strip()
-                    ))
-                    ev = parse_json(raw_eval)
-                    ev_score    = ev.get("score", 5)
-                    ev_signal   = ev.get("signal", "adequate")
-                    ev_feedback = ev.get("feedback", "Answer recorded.")
+                with st.spinner("Calibrating your answer..."):
+                    try:
+                        raw_eval = call_groq(None, EVALUATE_ANSWER_PROMPT.format(
+                            skill_name=skill["name"],
+                            required=skill.get("required_level", 7),
+                            claimed=skill.get("claimed_level", 5),
+                            question=q_text,
+                            answer=answer.strip()
+                        ))
+                        ev = parse_json(raw_eval)
+                        ev_score    = ev.get("score", 5)
+                        ev_signal   = ev.get("signal", "adequate")
+                        ev_feedback = ev.get("feedback", "Answer recorded.")
 
-                    # Append to chat history
-                    st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
-                    st.session_state.chat_history.append({"role": "user",  "content": answer.strip()})
-                    clean_feedback = re.sub(r"<[^>]+>", "", ev_feedback).strip()
-                    st.session_state.chat_history.append({
-                        "role": "agent",
-                        "content": clean_feedback,
-                        "score": ev_score,
-                        "signal": ev_signal
-                    })
+                        # Append to chat history
+                        st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
+                        st.session_state.chat_history.append({"role": "user",  "content": answer.strip()})
+                        clean_feedback = re.sub(r"<[^>]+>", "", ev_feedback).strip()
+                        st.session_state.chat_history.append({
+                            "role": "agent",
+                            "content": clean_feedback,
+                            "score": ev_score,
+                            "signal": ev_signal
+                        })
 
-                    # Advance
-                    next_qi = qi + 1
-                    if next_qi >= total_q_this_skill:
-                        recent_scores = [m["score"] for m in st.session_state.chat_history if m.get("score") is not None]
-                        avg = recent_scores[-1] if recent_scores else 5
-                        st.session_state.skill_scores.append({"skill": skill["name"], "score": avg})
-                        st.session_state.current_skill_idx += 1
-                        st.session_state.current_q_idx = 0
-                    else:
-                        st.session_state.current_q_idx = next_qi
+                        # Advance
+                        next_qi = qi + 1
+                        if next_qi >= total_q_this_skill:
+                            recent_scores = [m["score"] for m in st.session_state.chat_history if m.get("score") is not None]
+                            avg = recent_scores[-1] if recent_scores else 5
+                            st.session_state.skill_scores.append({"skill": skill["name"], "score": avg})
+                            st.session_state.current_skill_idx += 1
+                            st.session_state.current_q_idx = 0
+                        else:
+                            st.session_state.current_q_idx = next_qi
 
-                    _eval_ph.empty()
-                    st.rerun()
-                except Exception as e:
-                    _eval_ph.empty()
-                    st.error(f"Evaluation error: {e}")
+                    except Exception as e:
+                        st.error(f"Evaluation error: {e}")
+                st.rerun()
 
             if skip:
                 st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
@@ -1717,15 +1675,8 @@ elif st.session_state.phase == 2:
             st.session_state.final_data = fd_result
             fd = fd_result
 
-            _final_ph = show_loading(
-                "Almost there...",
-                "generating interview prep & roadmap",
-                steps=[
-                    ("Score computed ✓",          "done"),
-                    ("Generating interview prep",  "active"),
-                    ("Building 14-day roadmap",    "active"),
-                ]
-            )
+            _final_ph = st.empty()
+            _final_ph.info("⬡  Generating interview prep & 14-day roadmap...")
 
             def _fetch_interview():
                 raw = call_groq(None, INTERVIEW_PREP_PROMPT.format(
