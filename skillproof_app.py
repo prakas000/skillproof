@@ -1627,24 +1627,37 @@ elif st.session_state.phase == 2:
         type_icons = {"video": "▶", "course": "🎓", "doc": "📖", "book": "📚", "github": "⬡"}
         if isinstance(rdata, list) and rdata:
             for d in rdata[:14]:
-                res_html = "".join(
-                    f'<a href="{r.get("url","#")}" target="_blank">{type_icons.get(r.get("type",""),"🔗")} {r.get("label","Resource")}</a>'
-                    for r in d.get("resources", [])
+                # Strip HTML from all text fields — model sometimes returns HTML tags in JSON strings
+                topic    = re.sub(r"<[^>]+>", "", str(d.get("topic", ""))).strip()
+                hours    = d.get("hours", 1.5)
+                day_num  = d.get("day", "?")
+                adj_raw  = re.sub(r"<[^>]+>", "", str(d.get("adjacency_note") or "")).strip()
+                adj_html = f'<div style="font-size:0.72rem; color:#00956e; font-style:italic; margin-bottom:3px;">↳ {adj_raw}</div>' if adj_raw and adj_raw.lower() != "null" else ""
+
+                # Strip HTML from each activity
+                acts = [re.sub(r"<[^>]+>", "", str(a)).strip() for a in d.get("activities", [])]
+                acts_str = " · ".join(acts)
+
+                # Build resource links — strip HTML from labels
+                res_parts = []
+                for r in d.get("resources", []):
+                    label = re.sub(r"<[^>]+>", "", str(r.get("label", "Resource"))).strip()
+                    url   = re.sub(r"<[^>]+>", "", str(r.get("url", "#"))).strip()
+                    icon  = type_icons.get(r.get("type", ""), "🔗")
+                    res_parts.append(f'<a href="{url}" target="_blank">{icon} {label}</a>')
+                res_html = "".join(res_parts)
+
+                st.markdown(
+                    f'<div class="rm-day">'
+                    f'<div class="rm-badge">D{day_num}<br><span style="font-size:0.55rem; color:#006b50;">{hours}h</span></div>'
+                    f'<div>'
+                    f'{adj_html}'
+                    f'<div class="rm-topic">{topic}</div>'
+                    f'<div class="rm-act">{acts_str}</div>'
+                    f'<div class="rm-res" style="margin-top:6px;">{res_html}</div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True
                 )
-                adj = d.get("adjacency_note")
-                adj_html = f'<div style="font-size:0.72rem; color:#00956e; font-style:italic; margin-bottom:3px;">↳ {adj}</div>' if adj and adj != "null" else ""
-                hours = d.get("hours", 1.5)
-                st.markdown(f"""
-                <div class="rm-day">
-                  <div class="rm-badge">D{d.get("day","?")}<br><span style="font-size:0.55rem; color:#006b50;">{hours}h</span></div>
-                  <div>
-                    {adj_html}
-                    <div class="rm-topic">{d.get("topic","")}</div>
-                    <div class="rm-act">{" · ".join(d.get("activities",[]))}</div>
-                    <div class="rm-res" style="margin-top:6px;">{res_html}</div>
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
         else:
             st.warning("Roadmap unavailable.")
         st.markdown('</div>', unsafe_allow_html=True)
