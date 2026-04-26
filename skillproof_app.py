@@ -704,7 +704,7 @@ def make_learning_curve() -> go.Figure:
 #  PROMPTS
 # ─────────────────────────────────────────────
 
-EXTRACT_SKILLS_PROMPT = """You are a technical recruiter. Extract the 6 most critical skills from this Job Description.
+EXTRACT_SKILLS_PROMPT = """You are a technical recruiter. Extract the most critical skills (up to 6) from this Job Description.
 
 JD:
 {jd}
@@ -725,57 +725,66 @@ Return JSON only:
   ]
 }}"""
 
-GENERATE_PROBE_PROMPT = """You are a senior technical interviewer assessing real proficiency (not resume claims).
+GENERATE_PROBE_PROMPT = """You are a friendly but thorough hiring manager interviewing a candidate for a {depth}-level role.
+You want to understand how well they know {skill_name} — but you want to have a natural conversation, not an exam.
 
-Skill: {skill_name}
-Candidate's claimed level: {claimed}/10
-Required level: {required}/10
-Probe depth: {depth}
+Role context: the candidate is applying for a position where {skill_name} is important.
+Their resume suggests a level of {claimed}/10. The role needs {required}/10.
 
-Generate exactly 2 probing questions that test REAL understanding of {skill_name}.
-- Q1: conceptual/diagnostic — reveals whether they understand the fundamentals
-- Q2: scenario/practical — reveals whether they can apply it in a real situation
-- Questions must be progressively harder if claimed level is high
-- Do NOT ask generic "tell me about yourself" questions
+Write exactly 2 interview questions about {skill_name}:
+- Q1: A warm, open question a real hiring manager would ask — something like "Can you walk me through how you've used X?" or "How would you approach Y?" — conversational, not textbook
+- Q2: A slightly more specific follow-up that reveals whether they really understand it in practice — still human in tone, not a quiz question
+
+Rules:
+- Sound like a person, not an assessment tool
+- No trick questions, no jargon overload
+- Short and clear — one question per entry, not a paragraph
+- Match tone to depth: beginner = casual and friendly, intermediate = professional, advanced = peer-level technical
 
 Return JSON only:
 [
-  {{"q": "<question text>", "type": "Conceptual"}},
-  {{"q": "<question text>", "type": "Practical"}}
+  {{"q": "<question>", "type": "Experience"}},
+  {{"q": "<question>", "type": "Practical"}}
 ]"""
 
-EVALUATE_ANSWER_PROMPT = """You are a senior technical interviewer. Evaluate this candidate answer for the given skill.
+EVALUATE_ANSWER_PROMPT = """You are a hiring manager who just heard this answer in an interview.
+React honestly and fairly — like a real person would, not a scoring machine.
 
-Skill: {skill_name}
+Role: hiring manager evaluating {skill_name} proficiency
 Required level: {required}/10
 Claimed level: {claimed}/10
-Question: {question}
-Candidate Answer: {answer}
+Question asked: {question}
+Candidate's answer: {answer}
 
-Score the answer 1-10 based on:
-- Accuracy and depth of knowledge demonstrated
-- Use of specific technical vocabulary correctly
-- Evidence of hands-on experience vs surface-level knowledge
-- Ability to handle edge cases or nuances
+Score 1-10 where:
+- 1-3: Answer shows little real understanding — vague, generic, or incorrect
+- 4-6: Decent answer — shows some familiarity but missing depth or specifics
+- 7-8: Good answer — clear understanding, mentions real experience or concrete details
+- 9-10: Impressive — specific, nuanced, shows they've actually done this
+
+Be fair. A conversational answer that shows genuine understanding beats a rehearsed but hollow technical answer.
+Keep feedback warm and constructive — one or two sentences max, like you'd say it in the room.
 
 Return JSON only:
 {{
   "score": <1-10>,
   "signal": "<strong|adequate|weak|incorrect>",
-  "feedback": "<1-2 sentence honest assessment of the answer>",
+  "feedback": "<1-2 sentence honest but human reaction to the answer>",
   "revealed_gap": "<null or specific knowledge gap revealed>"
 }}"""
 
 FINAL_ANALYSIS_PROMPT = """Analyse this candidate using BOTH the resume AND the conversational interview transcript.
 
 SCORING RUBRIC (100 pts):
-  A) Proven Technical Skills (from interview) — 50 pts  ← WEIGHT THIS MOST
+  A) Proven Technical Skills (from interview) — 50 pts  <- WEIGHT THIS MOST
   B) Domain Transferability                   — 30 pts
   C) Academic Background & Experience         — 20 pts
 
-CRITICAL: The interview answers are ground truth. If a candidate claimed X on their resume but demonstrated Y in the interview, use Y. Be honest but fair.
-Do NOT go below 40% unless interview showed complete absence of knowledge.
-Do NOT go above 92%.
+CRITICAL RULES:
+- Interview answers are ground truth. If resume claims X but interview showed Y, use Y.
+- Skipped questions are NEUTRAL — do not penalise. Fall back to resume evidence for those skills.
+- Do NOT go below 40% unless interview showed complete absence of knowledge.
+- Do NOT go above 92%.
 
 JD:
 {jd}
@@ -786,8 +795,11 @@ RESUME:
 INTERVIEW TRANSCRIPT:
 {transcript}
 
-SKILL CALIBRATION (proven scores from live interview):
+SKILL CALIBRATION (proven scores from live interview — skipped skills excluded):
 {calibration}
+
+SKIPPED SKILLS NOTE:
+{skipped_note}
 
 Return JSON only:
 {{
@@ -799,14 +811,14 @@ Return JSON only:
     {{
       "name": "<skill>",
       "claimed": <1-10 from resume>,
-      "current": <1-10 proven in interview>,
+      "current": <1-10 proven in interview, or resume-inferred if skipped>,
       "required": <1-10>,
-      "evidence": "<brief note referencing their interview answer>"
+      "evidence": "<brief note — if skipped write: Not assessed in interview, inferred from resume>"
     }}
   ],
   "top_gaps": ["<gap 1>", "<gap 2>", "<gap 3>"],
   "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
-  "calibration_note": "<1 sentence on how interview matched or differed from resume claims>"
+  "calibration_note": "<1 sentence on how interview matched or differed from resume claims, mention any skipped skills by name>"
 }}"""
 
 INTERVIEW_PREP_PROMPT = """Senior technical interviewer. Role: '{role}'. Proven weak areas: {gaps}.
@@ -990,7 +1002,7 @@ with st.sidebar:
       Phase 4 — Calibrated Scoring<br>
       Phase 5 — Career Report<br><br>
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>PROBE MODES</b><br>
-      ⚡ Quick Scan — 1 Q/skill (~6)<br>
+      ⚡ Quick Scan — 1 Q/skill (~4)<br>
       ⬡ Standard — 2 Q/skill (~12)<br>
       🔬 Deep Probe — 3 Q/skill (~18)<br><br>
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>SCORING ENGINE</b><br>
@@ -1103,9 +1115,9 @@ if st.session_state.phase == 0:
     """, unsafe_allow_html=True)
 
     PROBE_MODES = {
-        "Quick Scan":  {"q_per_skill": 1, "total": "~6 questions", "icon": "⚡", "desc": "One sharp question per skill. Best for a fast, focused assessment.", "depth_override": "beginner"},
-        "Standard":    {"q_per_skill": 2, "total": "~12 questions", "icon": "⬡", "desc": "Two calibrated questions per skill — conceptual + practical. Recommended.", "depth_override": None},
-        "Deep Probe":  {"q_per_skill": 3, "total": "~18 questions", "icon": "🔬", "desc": "Three layered questions per skill for high-stakes roles or senior positions.", "depth_override": "advanced"},
+        "Quick Scan":  {"q_per_skill": 1, "total": "~4 questions", "icon": "⚡", "desc": "One focused question per skill. Fast and efficient — takes about 5 minutes.", "depth_override": "beginner", "skill_limit": 4},
+        "Standard":    {"q_per_skill": 2, "total": "~12 questions", "icon": "⬡", "desc": "Two calibrated questions per skill — conceptual + practical. Recommended.", "depth_override": None, "skill_limit": 6},
+        "Deep Probe":  {"q_per_skill": 3, "total": "~18 questions", "icon": "🔬", "desc": "Three layered questions per skill for high-stakes roles or senior positions.", "depth_override": "advanced", "skill_limit": 6},
     }
 
     if "probe_mode" not in st.session_state:
@@ -1165,13 +1177,14 @@ if st.session_state.phase == 0:
                 skills = plan.get("skills", [])
 
                 # Resolve probe mode settings
-                sel_mode   = PROBE_MODES[st.session_state.probe_mode]
-                q_per_skill = sel_mode["q_per_skill"]
+                sel_mode       = PROBE_MODES[st.session_state.probe_mode]
+                q_per_skill    = sel_mode["q_per_skill"]
                 depth_override = sel_mode["depth_override"]
+                skill_limit    = sel_mode.get("skill_limit", 6)
 
                 # Generate all probe questions upfront, respecting mode
                 all_probes = []
-                for sk in skills:
+                for sk in skills[:skill_limit]:
                     effective_depth = depth_override or sk.get("probe_depth", "intermediate")
                     raw_q = call_groq(None, GENERATE_PROBE_PROMPT.format(
                         skill_name=sk["name"],
@@ -1367,9 +1380,20 @@ elif st.session_state.phase == 1:
             if skip:
                 st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
                 st.session_state.chat_history.append({"role": "user", "content": "[Skipped]"})
+                st.session_state.chat_history.append({
+                    "role": "agent",
+                    "content": f"No problem — we'll note {skill['name']} as not assessed and fall back to your resume for that area.",
+                    "skill": skill["name"]
+                })
                 next_qi = qi + 1
                 if next_qi >= total_q_this_skill:
-                    st.session_state.skill_scores.append({"skill": skill["name"], "score": 3})
+                    # Mark as skipped — neutral, no score penalty, noted in report
+                    st.session_state.skill_scores.append({
+                        "skill": skill["name"],
+                        "score": None,
+                        "skipped": True,
+                        "skip_reason": "candidate skipped"
+                    })
                     st.session_state.current_skill_idx += 1
                     st.session_state.current_q_idx = 0
                 else:
@@ -1398,14 +1422,19 @@ elif st.session_state.phase == 2:
                 transcript_lines.append(line)
             transcript = "\n".join(transcript_lines)
 
-            calibration = json.dumps(st.session_state.skill_scores)
+            # Separate scored vs skipped skills for calibration note
+            scored   = [s for s in st.session_state.skill_scores if not s.get("skipped")]
+            skipped  = [s["skill"] for s in st.session_state.skill_scores if s.get("skipped")]
+            calibration = json.dumps(scored)
+            skipped_note = f"Skills NOT assessed (candidate skipped): {', '.join(skipped)}" if skipped else "All skills assessed."
 
             with st.spinner("⬡  Running final calibrated analysis..."):
                 raw_final = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
                     jd=st.session_state["_jd"][:3000],
                     resume=st.session_state["_resume"][:2500],
                     transcript=transcript[:4000],
-                    calibration=calibration
+                    calibration=calibration,
+                    skipped_note=skipped_note
                 ))
                 st.session_state.final_data = parse_json(raw_final)
 
