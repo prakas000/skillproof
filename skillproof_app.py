@@ -507,6 +507,21 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
 .cal-green { color: #00c896; }
 .cal-amber { color: #fbbf24; }
 .cal-red   { color: #f87171; }
+
+/* ── Assessment History Panel ── */
+.hist-entry {
+    background: #0a0e1c;
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    transition: all 0.15s;
+}
+.hist-entry:hover { border-color: rgba(0,200,150,0.25); background: rgba(0,200,150,0.03); }
+.hist-entry.hist-active { border-color: #00c896; background: rgba(0,200,150,0.06); }
+.hist-role { font-family: Syne, sans-serif; font-size: 0.78rem; font-weight: 700; color: #dde4f0; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hist-meta { font-family: Space Mono, monospace; font-size: 0.6rem; color: #2a3a52; display: inline-block; }
+.hist-score { font-family: Space Mono, monospace; font-size: 0.72rem; font-weight: 700; color: #00c896; float: right; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -903,7 +918,7 @@ def _get_provider_keys() -> list:
             active.append({**p, "api_key": key})
     return active
 
-def call_groq(client_unused, user_content: str, temperature: float = 0.0) -> str:
+def call_groq(client_unused, user_content: str, temperature: float = 0.0, max_tokens: int = 1024) -> str:
     """
     Multi-provider LLM call with automatic fallback.
     Tries each provider in order: Groq → Qwen → OpenAI.
@@ -934,7 +949,7 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0) -> str
                 ],
                 model=p["model"],
                 temperature=temperature,
-                max_tokens=4096,
+                max_tokens=max_tokens,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
@@ -1014,6 +1029,45 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
+
+    # ── Assessment History Panel ──
+    st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; letter-spacing:0.12em; margin-bottom:10px;">ASSESSMENT HISTORY</div>', unsafe_allow_html=True)
+
+    hist = st.session_state.get("assessment_history", [])
+    if not hist:
+        st.markdown('<div style="font-size:0.72rem; color:#1a2535; padding:8px 0;">No assessments yet.</div>', unsafe_allow_html=True)
+    else:
+        for i, entry in enumerate(reversed(hist)):
+            real_idx = len(hist) - 1 - i
+            is_active = st.session_state.get("viewing_history_idx") == real_idx
+            active_cls = "hist-active" if is_active else ""
+            score_val  = entry.get("score", 0)
+            score_clr  = "#34d399" if score_val >= 70 else "#fbbf24" if score_val >= 50 else "#f87171"
+            st.markdown(
+                f'<div class="hist-entry {active_cls}">'
+                f'<span class="hist-score" style="color:{score_clr};">{score_val}%</span>'
+                f'<div class="hist-role">{entry.get("role","Unknown Role")}</div>'
+                f'<span class="hist-meta">{entry.get("timestamp","")}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+            if st.button(f"↗ View report", key=f"hist_view_{real_idx}"):
+                # Restore full assessment state from snapshot
+                snap = entry["snapshot"]
+                st.session_state.final_data     = snap["final_data"]
+                st.session_state.interview_data = snap["interview_data"]
+                st.session_state.roadmap_data   = snap["roadmap_data"]
+                st.session_state.skill_scores   = snap["skill_scores"]
+                st.session_state.viewing_history_idx = real_idx
+                st.session_state.phase = 2
+                st.rerun()
+
+        if st.button("✕ Clear All History", key="clear_hist"):
+            st.session_state.assessment_history = []
+            st.session_state.viewing_history_idx = None
+            st.rerun()
+
+    st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
     st.markdown("""
     <div style='font-family:Space Mono,monospace; font-size:0.55rem; color:#1a2535; text-align:center; line-height:1.8;'>
       CATALYST HACKATHON 2025<br>
@@ -1031,6 +1085,11 @@ for key in ["phase", "skill_plan", "probe_questions", "chat_history",
             "final_data", "interview_data", "roadmap_data"]:
     if key not in st.session_state:
         st.session_state[key] = None if key in ["skill_plan","probe_questions","final_data","interview_data","roadmap_data"] else ([] if key in ["chat_history","skill_scores"] else 0)
+
+if "assessment_history" not in st.session_state:
+    st.session_state.assessment_history = []   # list of completed assessment snapshots
+if "viewing_history_idx" not in st.session_state:
+    st.session_state.viewing_history_idx = None  # index of history entry being viewed
 
 if st.session_state.phase is None:
     st.session_state.phase = 0  # 0=input, 1=probing, 2=results
@@ -1172,7 +1231,7 @@ if st.session_state.phase == 0:
             try:
                 # provider selected automatically by fallback engine
                 raw = call_groq(None, EXTRACT_SKILLS_PROMPT.format(
-                    jd=jd_input[:3000], resume=resume_text[:2500]))
+                    jd=jd_input[:3000], resume=resume_text[:2500]), max_tokens=512)
                 plan = parse_json(raw)
                 skills = plan.get("skills", [])
 
@@ -1191,7 +1250,7 @@ if st.session_state.phase == 0:
                         claimed=sk.get("claimed_level", 5),
                         required=sk.get("required_level", 7),
                         depth=effective_depth
-                    ))
+                    ), max_tokens=256)
                     qs = parse_json(raw_q)
                     if isinstance(qs, list):
                         # Trim to chosen q_per_skill
@@ -1355,7 +1414,7 @@ elif st.session_state.phase == 1:
                             claimed=skill.get("claimed_level", 5),
                             question=q_text,
                             answer=answer.strip()
-                        ))
+                        ), max_tokens=200)
                         ev = parse_json(raw_eval)
                         ev_score   = ev.get("score", 5)
                         ev_signal  = ev.get("signal", "adequate")
@@ -1449,7 +1508,7 @@ elif st.session_state.phase == 2:
                     transcript=transcript[:4000],
                     calibration=calibration,
                     skipped_note=skipped_note
-                ))
+                ), max_tokens=1500)
                 st.session_state.final_data = parse_json(raw_final)
 
             with st.spinner("⬡  Generating interview prep..."):
@@ -1457,7 +1516,7 @@ elif st.session_state.phase == 2:
                 raw_int = call_groq(None, INTERVIEW_PREP_PROMPT.format(
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", []))
-                ))
+                ), max_tokens=1500)
                 idata = parse_json(raw_int)
                 st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list,dict)) else []
 
@@ -1466,9 +1525,26 @@ elif st.session_state.phase == 2:
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
-                ))
+                ), max_tokens=2048)
                 rdata = parse_json(raw_road)
                 st.session_state.roadmap_data = unwrap(rdata) if isinstance(rdata, (list,dict)) else []
+
+            # ── Save to assessment history ──
+            import datetime
+            fd_snap = st.session_state.final_data or {}
+            history_entry = {
+                "role":      fd_snap.get("role", "Unknown Role"),
+                "score":     fd_snap.get("score", 0),
+                "timestamp": datetime.datetime.now().strftime("%d %b %Y · %H:%M"),
+                "snapshot": {
+                    "final_data":     st.session_state.final_data,
+                    "interview_data": st.session_state.interview_data,
+                    "roadmap_data":   st.session_state.roadmap_data,
+                    "skill_scores":   list(st.session_state.skill_scores),
+                }
+            }
+            st.session_state.assessment_history.append(history_entry)
+            st.session_state.viewing_history_idx = len(st.session_state.assessment_history) - 1
 
         except Exception as e:
             st.error(f"❌  Final analysis failed: {e}")
@@ -1752,7 +1828,9 @@ elif st.session_state.phase == 2:
                     "_jd","_resume"]:
             if key in st.session_state:
                 del st.session_state[key]
-        # probe_mode intentionally kept so user doesn't re-select every time
+        # Keep assessment_history — clear active viewing index
+        st.session_state.viewing_history_idx = None
+        # probe_mode intentionally kept
         st.rerun()
 
     # Footer
