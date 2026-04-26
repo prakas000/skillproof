@@ -1096,22 +1096,48 @@ def _strip_md_artifacts(obj):
         return {k: _strip_md_artifacts(v) for k, v in obj.items()}
     return obj
 
+def _fix_llm_json(s: str) -> str:
+    """
+    Fix malformed JSON produced by LLMs.
+    Handles the specific pattern where markdown __ bold markers straddle
+    JSON string boundaries, e.g.:
+        "url": "__https://example.com/path",
+        __ "type": "course"
+    becomes:
+        "url": "https://example.com/path",
+        "type": "course"
+    Strategy: scan char by char tracking whether we're inside a JSON string.
+    Inside strings: strip leading/trailing __ from the value.
+    Outside strings: remove bare __ tokens entirely.
+    """
+    # Step 1: strip code fences
+    s = re.sub(r"```json\s*", "", s)
+    s = re.sub(r"```\s*", "", s)
+
+    # Step 2: fix the cross-line __ pattern.
+    # The LLM emits:  "url": "__https://...",\n__ "type"
+    # Meaning: __ prefix inside string, __ suffix outside string on next line.
+    # Fix by removing ALL __ tokens everywhere (they are never valid JSON).
+    # Use a line-by-line approach so we can also strip __ that starts a line.
+    lines = s.split('\n')
+    fixed_lines = []
+    for line in lines:
+        # Remove __ that appears at the start of a line (possibly after whitespace)
+        # e.g. `__ "type": "course"` → `"type": "course"`
+        line = re.sub(r'^\s*__\s*', '', line)
+        # Remove __ anywhere else in the line (inside strings, end of values, etc.)
+        line = line.replace('__', '')
+        fixed_lines.append(line)
+    s = '\n'.join(fixed_lines)
+
+    # Step 3: trailing commas before } or ]
+    s = re.sub(r",\s*([\}\]])", r"\1", s)
+
+    return s.strip()
+
 def parse_json(raw: str):
     if not raw:
         raise ValueError("Empty response.")
-    # Pre-strip __ markdown bold markers that the LLM injects into URLs/values.
-    # These can span newlines: "__https://...\n__ " so handle both cases upfront.
-    raw = re.sub(r'__\s*\n\s*__', ' ', raw)
-    raw = re.sub(r'__', '', raw)
-    def clean(s):
-        s = re.sub(r"```json\s*", "", s)
-        s = re.sub(r"```\s*", "", s)
-        # Remove __ markdown bold markers that may span newlines inside JSON
-        # e.g. "__https://example.com/\n__ next" or "url": "__https://...__"
-        s = re.sub(r'__\s*\n\s*__', ' ', s)   # __ \n __ across lines -> space
-        s = re.sub(r'__', '', s)               # remove all remaining __ pairs/singles
-        s = re.sub(r",\s*([\}\]])", r"\1", s)  # trailing commas
-        return s.strip()
 
     def try_parse(s):
         try:
@@ -1120,30 +1146,28 @@ def parse_json(raw: str):
         except Exception:
             return None
 
-    # Attempt 1: raw as-is
+    # Attempt 1: raw as-is (fast path for well-formed responses)
     r = try_parse(raw)
     if r is not None: return r
 
-    cleaned = clean(raw)
-
-    # Attempt 2: cleaned
+    # Attempt 2: apply full cleaning
+    cleaned = _fix_llm_json(raw)
     r = try_parse(cleaned)
     if r is not None: return r
 
-    # Attempt 3: extract JSON block via regex
+    # Attempt 3: extract outermost JSON array or object
     for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
         m = re.search(pattern, cleaned)
         if m:
             r = try_parse(m.group(1))
             if r is not None: return r
-            # Attempt 4: truncated JSON — try trimming to last complete item
+
+            # Attempt 4: truncated JSON — salvage up to the last complete item
             fragment = m.group(1)
-            # Find last complete object/array boundary
-            for end_char, open_char in [(']', '['), ('}', '{')]:
+            for end_char in (']', '}'):
                 last = fragment.rfind(end_char)
                 if last > 0:
-                    trimmed = fragment[:last+1]
-                    r = try_parse(trimmed)
+                    r = try_parse(fragment[:last + 1])
                     if r is not None: return r
 
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
