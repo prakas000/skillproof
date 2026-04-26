@@ -739,8 +739,9 @@ def make_gauge(score: int) -> go.Figure:
 
 def make_bar_chart(skills: list) -> go.Figure:
     names    = [s["name"] for s in skills]
-    claimed  = [s.get("claimed", s["current"]) for s in skills]
-    proven   = [s["current"] for s in skills]
+    claimed  = [s.get("claimed", 5) for s in skills]
+    # For skipped skills (current is None), show claimed value with different color via customdata
+    proven   = [s["current"] if s["current"] is not None else None for s in skills]
     required = [s["required"] for s in skills]
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -773,9 +774,11 @@ def make_bar_chart(skills: list) -> go.Figure:
 
 def make_radar(skills: list) -> go.Figure:
     cats     = [s["name"] for s in skills] + [skills[0]["name"]]
-    proven   = [s["current"] for s in skills] + [skills[0]["current"]]
+    # For skipped skills, use claimed as fallback so the radar doesn't break on None
+    proven   = [(s["current"] if s["current"] is not None else s.get("claimed", 5)) for s in skills]
+    proven   = proven + [proven[0]]
     required = [s["required"] for s in skills] + [skills[0]["required"]]
-    claimed  = [s.get("claimed", s["current"]) for s in skills] + [skills[0].get("claimed", skills[0]["current"])]
+    claimed  = [s.get("claimed", 5) for s in skills] + [skills[0].get("claimed", 5)]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=required, theta=cats, fill="toself", name="Required",
         line_color="#fbbf24", fillcolor="rgba(251,191,36,0.06)"))
@@ -1634,31 +1637,33 @@ elif st.session_state.phase == 2:
                 skipped   = sc_entry.get("skipped", False)
                 claimed   = sk_info.get("claimed_level", 5)
                 required  = sk_info.get("required_level", 7)
-                proven    = claimed if skipped else int(sc_entry.get("score") or claimed)
-                evidence  = "Not assessed in interview, inferred from resume." if skipped else "Scored from live interview answers."
+                proven    = None if skipped else int(sc_entry.get("score") or claimed)
+                evidence  = "Skipped — not assessed in interview." if skipped else "Scored from live interview answers."
                 skills_out.append({
                     "name":     sk_name,
                     "claimed":  claimed,
                     "current":  proven,
                     "required": required,
+                    "skipped":  skipped,
                     "evidence": evidence,
                 })
-                proven_scores.append(proven)
+                if not skipped:
+                    proven_scores.append(proven)
 
             # Weighted proof score: 50% proven skills avg, 30% domain fit, 20% experience baseline
             avg_proven   = (sum(proven_scores) / len(proven_scores) * 10) if proven_scores else 50
             proof_score  = int(min(92, max(40, avg_proven * 0.5 + 65 * 0.3 + 70 * 0.2)))
             resume_score = int(min(92, max(40, sum(s["claimed"] for s in skills_out) / max(len(skills_out),1) * 10 * 0.5 + 65 * 0.3 + 70 * 0.2)))
 
-            # Gaps = skills where proven < required, sorted by gap size
+            # Gaps = skills where proven < required (skip unassessed skills), sorted by gap size
             gaps_sorted   = sorted(
-                [s for s in skills_out if s["current"] < s["required"]],
+                [s for s in skills_out if s["current"] is not None and s["current"] < s["required"]],
                 key=lambda x: x["required"] - x["current"], reverse=True
             )
             top_gaps      = [s["name"] for s in gaps_sorted[:3]]
-            # Strengths = skills where proven >= required
+            # Strengths = skills where proven >= required (skip unassessed skills)
             strong_sorted = sorted(
-                [s for s in skills_out if s["current"] >= s["required"]],
+                [s for s in skills_out if s["current"] is not None and s["current"] >= s["required"]],
                 key=lambda x: x["current"], reverse=True
             )
             strengths     = [s["name"] for s in strong_sorted[:3]]
@@ -1828,28 +1833,39 @@ elif st.session_state.phase == 2:
 
     tags_html = ""
     for sk in skills:
-        gap_val = sk.get("required", 7) - sk.get("current", 5)
+        current = sk.get("current")  # None when skipped
+        proxy   = current if current is not None else sk.get("claimed", 5)
+        gap_val = sk.get("required", 7) - proxy
         dc, dl = delta_class(gap_val)
         tags_html += f'<span class="delta-tag {dc}">{sk["name"]} — {dl}</span>'
     st.markdown(f'<div style="margin-bottom:16px;">{tags_html}</div>', unsafe_allow_html=True)
 
     rows = ""
     for sk in skills:
-        claimed   = sk.get("claimed", sk.get("current", 5))
-        proven    = sk.get("current", 5)
+        claimed   = sk.get("claimed", 5)
+        proven    = sk.get("current")   # None when skipped
         required  = sk.get("required", 7)
-        gap_val   = max(0, required - proven)
-        bar_w     = int(gap_val / 9 * 100)
-        clr       = gap_color(gap_val)
+        skipped   = sk.get("skipped", proven is None)
         ev        = sk.get("evidence", "—")
-        drift     = proven - claimed
-        drift_str = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
-                     else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
-                     else '<span style="color:#4a6280;">±0</span>')
+
+        if skipped or proven is None:
+            proven_display = '<span style="color:#4a6280;">—</span>'
+            drift_str      = '<span style="color:#4a6280;">—</span>'
+            gap_val        = max(0, required - claimed)   # use claimed as proxy for gap bar
+        else:
+            proven_display = f'{proven}/10'
+            drift          = proven - claimed
+            drift_str      = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
+                              else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
+                              else '<span style="color:#4a6280;">±0</span>')
+            gap_val        = max(0, required - proven)
+
+        bar_w = int(gap_val / 9 * 100)
+        clr   = gap_color(gap_val)
         rows += f"""<tr>
           <td><b style='color:#dde4f0; font-family:Syne,sans-serif;'>{sk['name']}</b></td>
           <td style='text-align:center; color:#4a6280; font-family:Space Mono,monospace;'>{claimed}/10</td>
-          <td style='text-align:center; color:#00c896; font-family:Space Mono,monospace; font-weight:700;'>{proven}/10</td>
+          <td style='text-align:center; color:#00c896; font-family:Space Mono,monospace; font-weight:700;'>{proven_display}</td>
           <td style='text-align:center; color:#fbbf24; font-family:Space Mono,monospace;'>{required}/10</td>
           <td style='text-align:center; font-family:Space Mono,monospace; font-size:0.8rem;'>{drift_str}</td>
           <td>
