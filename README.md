@@ -1,158 +1,191 @@
-# SkillProof - Prove What You Know
+# ⬡ SkillProof — Prove What You Know
 
-> **An AI agent that conversationally assesses real skill proficiency - not just resume claims.**
-
-![SkillProof](https://img.shields.io/badge/SkillProof-Catalyst%202025-00c896?style=for-the-badge)
-![Powered by Groq](https://img.shields.io/badge/Powered%20by-Groq%20%2B%20Llama--3.3--70B-orange?style=for-the-badge)
-![Built with Streamlit](https://img.shields.io/badge/Built%20with-Streamlit-FF4B4B?style=for-the-badge)
+> **Deccan.ai Catalyst Hackathon · April 2026**
+> AI-powered skill verification that separates resume claims from real-world competence.
 
 ---
 
-## The Problem
+## What It Does
 
-Every resume-screening tool today does the same thing: compare keywords in a resume against keywords in a job description. A candidate who writes "proficient in PyTorch" scores identically to one with 3 years of production ML experience. **There is no signal separation.**
+SkillProof is a career intelligence tool that conducts a live AI-driven interview, calibrates your actual skill levels against what your resume claims, and delivers a full gap analysis — with a personalised 14-day learning roadmap to close those gaps before your real interview.
 
-Recruiters waste hours on interviews that reveal the resume was inflated. Candidates who are genuinely strong but wrote a weak resume get filtered out. The screening layer is broken.
-
----
-
-## What SkillProof Does
-
-SkillProof is a conversational AI agent that **probes each claimed skill with targeted questions** and scores the candidate's live answers - not their resume text.
-
-The final **Proof Score** is calibrated from interview performance, not document parsing. Resume claims are shown alongside proven scores so the drift is visible and actionable.
-
-### The Core Insight
-
-> A resume is a marketing document. An interview answer is evidence.  
-> SkillProof treats them accordingly - interview answers override resume claims in scoring.
+**The core insight:** Resumes lie — not because candidates are dishonest, but because self-assessment is hard. SkillProof replaces guesswork with evidence.
 
 ---
 
-## Architecture & Key Decisions
-
-### Pipeline (4 Phases)
+## How It Works — 4 Phases
 
 ```
-Phase 1 - EXTRACT
-  └── Parse JD + Resume
-  └── Identify 6 critical skills with claimed level (from resume) 
-      and required level (from JD)
-  └── Assign probe depth per skill: beginner | intermediate | advanced
-
-Phase 2 - PROBE  (the core differentiator)
-  └── For each skill → generate N calibrated questions (user-selectable)
-  └── Q1: Conceptual - tests foundational understanding
-  └── Q2: Practical  - tests real-world application ability
-  └── Each answer evaluated in real-time by the model
-  └── Scoring rubric: accuracy, technical vocabulary, hands-on evidence, edge-case handling
-  └── Live calibration panel updates as candidate answers
-
-Phase 3 - CALIBRATE
-  └── Final scoring call receives: resume text + full interview transcript
-  └── Interview answers explicitly weighted over resume claims (50% vs 40% vs 10% rubric)
-  └── Shows "Drift" column: Proven score minus Claimed score per skill
-
-Phase 4 - REPORT
-  └── Proof Score (interview-calibrated)
-  └── Resume-only score (for comparison)
-  └── Skill gap table with evidence from actual answers
-  └── Bar chart: Resume Claim vs Proven vs Required (3-way comparison)
-  └── Radar chart, 14-day learning roadmap, 8 interview prep Q&As
-  └── Live job search links for the identified role
+01 EXTRACT → 02 PROBE → 03 CALIBRATE → 04 REPORT
 ```
 
-### Key Architectural Decisions
+| Phase | What Happens |
+|-------|-------------|
+| **01 · Extract** | Paste or upload a JD + resume. The AI parses both, identifies the 6 most critical skills, infers claimed levels from the resume, and sets required levels from the JD. |
+| **02 · Probe** | A conversational AI interviewer asks 2 calibrated questions per skill — warm and human, not an exam. You answer in a chat interface. |
+| **03 · Calibrate** | Each answer is scored 1–10 in real-time. Interview evidence overrides resume claims, computing a "Proof Score". |
+| **04 · Report** | Full dashboard: Proof Score gauge, skill gap table with drift analysis, bar + radar charts, 8 interview prep Q&As, and a 14-day adjacency-prioritised learning roadmap. |
 
-**1. Upfront question generation, not on-the-fly**  
-All probe questions for all skills are generated before the interview starts. This avoids latency mid-conversation and allows consistent depth calibration. Trade-off: slightly longer loading at the start, but a smoother interview experience.
+---
 
-**2. Hardened JSON-only API contract**  
-Every Groq call uses a strict system prompt forcing pure JSON output. A 5-strategy fallback parser (`parse_json()`) handles edge cases: direct parse → clean fences → extract `{...}` block → extract `[...]` block → wrap bare content. This makes the pipeline robust against model formatting drift.
+## Scoring Logic
 
-**3. Temperature = 0.0 for scoring calls**  
-Deterministic output for evaluation and scoring. Slight temperature (0.1) only for question generation to avoid repetitive phrasing.
+### Proof Score (0–100)
 
-**4. Interview transcript as ground truth**  
-The final `FINAL_ANALYSIS_PROMPT` explicitly instructs the model: *"If a candidate claimed X on their resume but demonstrated Y in the interview, use Y."* The transcript is passed alongside the resume so both are visible to the scoring model.
+```
+Proof Score = weighted_average(proven_scores) × 10
+```
 
-**5. Session-cached results**  
-Results are fingerprinted (MD5 of JD + resume text) and cached in `st.session_state`. Re-running with the same inputs shows cached results instantly - no redundant API calls.
+Each skill's **proven score** is determined by the AI evaluator which considers:
+- Accuracy and depth of the candidate's answer
+- Evidence of practical application vs. theoretical knowledge
+- Calibration against the required level for the role
 
-**6. User-selectable probe depth**  
-Three modes give the user control over assessment length:
-- ⚡ Quick Scan - 1 question/skill (~6 total)
-- ⬡ Standard - 2 questions/skill (~12 total)  
-- 🔬 Deep Probe - 3 questions/skill (~18 total)
+**Drift** = `Proven − Claimed`
+- Positive drift → candidate under-sold themselves
+- Negative drift → resume may be over-claiming
+
+**Verdicts:**
+| Score | Verdict |
+|-------|---------|
+| < 50 | Needs Development |
+| 50–69 | Emerging Candidate |
+| 70–84 | Strong Candidate |
+| 85–100 | Elite Candidate |
+
+### Gap Priority
+Gaps are flagged Critical / High / Medium / Proficient based on the delta between proven level and required level. The roadmap prioritises skills using **adjacency ordering** — skills that unlock other skills come first.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Streamlit Frontend                    │
+│  Phase stepper · Chat UI · Plotly charts · Dashboard    │
+└───────────────────┬─────────────────────────────────────┘
+                    │ User input (JD, resume, chat answers)
+                    ▼
+┌─────────────────────────────────────────────────────────┐
+│              Prompt Orchestration Layer                  │
+│  EXTRACT_SKILLS → BATCH_PROBE → EVALUATE → REPORT GEN   │
+└───────────────────┬─────────────────────────────────────┘
+                    │ Structured JSON requests
+                    ▼
+┌─────────────────────────────────────────────────────────┐
+│            Qwen / Qwen-Plus via OpenAI-compat API        │
+│         (skill extraction · interview · scoring)         │
+└─────────────────────────────────────────────────────────┘
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+  PDF Resume Parser      Session State Store
+  (pypdf)                (Streamlit in-memory)
+```
+
+All AI calls return structured JSON. The app parses, validates, and renders results in a single-page dashboard.
+
+---
+
+## Sample Input & Output
+
+### Input
+**Job Description (excerpt):**
+> "We are looking for a Senior Data Scientist with strong experience in Python, machine learning model deployment, SQL, and stakeholder communication…"
+
+**Resume (excerpt):**
+> "5 years in data science. Proficient in Python, scikit-learn, TensorFlow. Led 3 ML projects end-to-end…"
+
+### Output — Proof Score Dashboard
+```
+Proof Score: 67 / 100   →   Emerging Candidate
+
+Skill           Claimed  Proven  Required  Drift
+──────────────────────────────────────────────────
+Python            8/10    7/10     8/10    -1  ✓
+ML Deployment     7/10    5/10     9/10    -2  ⚠ HIGH GAP
+SQL               6/10    6/10     7/10    0   ✓
+Communication     7/10    8/10     6/10    +1  ✓ (exceeded)
+Statistics        5/10    4/10     8/10    -1  ⚠ CRITICAL GAP
+Cloud/MLOps       4/10    3/10     8/10    -1  ⚠ CRITICAL GAP
+
+14-Day Roadmap: 42 hrs total · ~3.0 hrs/day
+D1 → ML Deployment Fundamentals (adjacency: unlocks Cloud/MLOps)
+D2 → Docker + model serving patterns
+...
+```
 
 ---
 
 ## Tech Stack
 
-| Layer | Choice | Reason |
-|---|---|---|
-| LLM Inference | Groq + Llama-3.3-70B-Versatile | Sub-second latency for conversational feel; best instruction-following at this speed |
-| Frontend | Streamlit | Rapid iteration; chat + charts + state in one framework |
-| PDF Parsing | pypdf | Lightweight, no external dependencies |
-| Charts | Plotly | Interactive; supports gauge, radar, bar, and scatter in one lib |
-| Scoring Model | WSS v4 (Weighted Semantic Scoring) | Custom rubric weighting interview evidence > resume claims |
+| Layer | Technology |
+|-------|-----------|
+| Frontend | Streamlit 1.32+ |
+| AI Model | Qwen-Plus (via OpenAI-compatible endpoint) |
+| Charting | Plotly (gauge, bar, radar, learning curve) |
+| PDF Parsing | pypdf |
+| Fonts | Syne · Space Mono · Instrument Sans |
+| Hosting | Streamlit Community Cloud |
 
 ---
 
-## Setup & Running Locally
+## Local Setup
 
 ### Prerequisites
-- Python 3.8+
-- A free [Groq API key](https://console.groq.com)
+- Python 3.10+
+- A Qwen API key (set via the sidebar in the app, or as an env var)
 
-### Install
+### Install & Run
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/skillproof.git
+# 1. Clone the repo
+git clone https://github.com/<your-username>/skillproof
 cd skillproof
+
+# 2. Install dependencies
 pip install -r requirements.txt
-```
 
-### Run
-
-```bash
+# 3. Run the app
 streamlit run skillproof_app.py
 ```
 
-Enter your Groq API key in the sidebar when the app opens.
+### API Key
+Enter your **Qwen API key** in the sidebar when the app opens. The key is stored in session state only — never persisted.
 
-### Optional: Pre-configure your API key locally
+> If you're using a different OpenAI-compatible endpoint, update the `base_url` in the sidebar configuration.
 
-Create `.streamlit/secrets.toml`:
+---
 
-```toml
-GROQ_API_KEY = "gsk_your_key_here"
+## Project Structure
+
+```
+skillproof/
+├── skillproof_app.py      # Main application (single-file)
+├── requirements.txt       # Python dependencies
+├── README.md              # This file
+└── assets/
+    └── architecture.png   # Architecture diagram
 ```
 
-The app reads this automatically - leave the sidebar field blank.
+---
+
+## Roadmap (Post-Hackathon)
+
+- [ ] Export PDF report
+- [ ] Multi-role comparison mode
+- [ ] Recruiter view (bulk candidate scoring)
+- [ ] Voice interview mode
+- [ ] Integration with LinkedIn profile import
 
 ---
 
-## Live Demo
+## Team
 
-🔗 **[skillproof.streamlit.app](https://YOUR_APP_URL.streamlit.app)**  
-*(No setup needed - API key pre-configured for demo)*
-
----
-
-## Submission - Catalyst 2025
-
-**Built by:** Prakash Raj Govindaraj
-**Hackathon:** Catalyst by deccan.ai - April 24–27, 2025  
-**Track:** AI Agent  
-**Stack:** Groq · Llama-3.3-70B · Streamlit · Python  
+Built for the **Deccan.ai Catalyst Hackathon · April 2026**
+Submitted by: **Prakash** · [prakashrajastro@gmail.com](mailto:prakashrajastro@gmail.com)
 
 ---
 
-## What Makes This Production-Minded
-
-- **Error handling at every layer** - try/except around all API calls, JSON parsing fallbacks, graceful degradation if interview/roadmap generation fails
-- **No hardcoded secrets** - API key via Streamlit secrets or user input; never in code
-- **Input sanitization** - HTML stripped from model responses before rendering to prevent injection via chat bubbles
-- **Stateful session management** - phase tracking, answer history, and calibration scores persist correctly across rerenders
-- **Modular prompts** - each pipeline stage is a separate, testable prompt constant; easy to swap models or adjust rubrics
+*SkillProof · Catalyst Hackathon 2026 · Deccan AI Experts*
