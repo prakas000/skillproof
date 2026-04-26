@@ -747,6 +747,28 @@ Return JSON only:
   {{"q": "<question>", "type": "Practical"}}
 ]"""
 
+BATCH_PROBE_PROMPT = """You are a friendly hiring manager preparing interview questions for a candidate applying for {role}.
+
+For each skill listed below, write exactly {q_per_skill} interview question(s).
+Keep questions conversational and human — the way a real hiring manager talks, not an exam.
+Q1 should be warm and open ("walk me through...", "how have you used...", "tell me about a time...")
+Q2 (if needed) should be a natural follow-up that reveals practical understanding.
+
+Skills to probe (JSON):
+{skills_json}
+
+Return JSON only — an array, one entry per skill:
+[
+  {{
+    "skill_name": "<exact skill name from input>",
+    "questions": [
+      {{"q": "<question>", "type": "Experience"}},
+      {{"q": "<follow-up question>", "type": "Practical"}}
+    ]
+  }}
+]
+Return exactly as many entries as skills provided."""
+
 EVALUATE_ANSWER_PROMPT = """You are a hiring manager who just heard this answer in an interview.
 React honestly and fairly — like a real person would, not a scoring machine.
 
@@ -875,7 +897,7 @@ PROVIDERS = [
         "name": "groq",
         "secret_key": "GROQ_API_KEY",
         "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.3-70b-versatile",
+        "model": "llama-3.1-8b-instant",   # fast model — 3-4x quicker than 70b
     },
     {
         "name": "qwen",
@@ -903,7 +925,7 @@ def _get_provider_keys() -> list:
             active.append({**p, "api_key": key})
     return active
 
-def call_groq(client_unused, user_content: str, temperature: float = 0.0) -> str:
+def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True) -> str:
     """
     Multi-provider LLM call with automatic fallback.
     Tries each provider in order: Groq → Qwen → OpenAI.
@@ -1182,19 +1204,37 @@ if st.session_state.phase == 0:
                 depth_override = sel_mode["depth_override"]
                 skill_limit    = sel_mode.get("skill_limit", 6)
 
-                # Generate all probe questions upfront, respecting mode
+                # Generate ALL skills' questions in ONE batched API call
+                # Much faster than one call per skill
                 all_probes = []
-                for sk in skills[:skill_limit]:
-                    effective_depth = depth_override or sk.get("probe_depth", "intermediate")
-                    raw_q = call_groq(None, GENERATE_PROBE_PROMPT.format(
-                        skill_name=sk["name"],
-                        claimed=sk.get("claimed_level", 5),
-                        required=sk.get("required_level", 7),
-                        depth=effective_depth
-                    ))
-                    qs = parse_json(raw_q)
-                    if isinstance(qs, list):
-                        # Trim to chosen q_per_skill
+                skills_subset = skills[:skill_limit]
+                skills_info = json.dumps([
+                    {
+                        "name": sk["name"],
+                        "claimed": sk.get("claimed_level", 5),
+                        "required": sk.get("required_level", 7),
+                        "depth": depth_override or sk.get("probe_depth", "intermediate")
+                    }
+                    for sk in skills_subset
+                ])
+                batch_prompt = BATCH_PROBE_PROMPT.format(
+                    role=plan.get("role", "the role"),
+                    q_per_skill=q_per_skill,
+                    skills_json=skills_info
+                )
+                raw_batch = call_groq(None, batch_prompt)
+                batch_result = parse_json(raw_batch)
+                if isinstance(batch_result, dict):
+                    batch_result = next(iter(batch_result.values()), [])
+                # batch_result is a list of {skill_name, questions:[{q, type}]}
+                for entry in batch_result:
+                    skill_name = entry.get("skill_name", "")
+                    # Find matching skill object
+                    sk = next((s for s in skills_subset if s["name"] == skill_name), None)
+                    if sk is None and skills_subset:
+                        sk = skills_subset[len(all_probes) % len(skills_subset)]
+                    qs = entry.get("questions", [])
+                    if sk and qs:
                         all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
 
                 st.session_state.skill_plan   = plan
