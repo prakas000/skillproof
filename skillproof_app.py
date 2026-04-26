@@ -851,25 +851,91 @@ Return JSON only:
 # ─────────────────────────────────────────────
 #  LLM CALL + PARSE
 # ─────────────────────────────────────────────
-def call_groq(client, user_content: str, temperature: float = 0.0) -> str:
-    resp = client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a JSON-only API. "
-                    "Your ENTIRE response must be valid JSON — either { } or [ ]. "
-                    "Start immediately with { or [. No markdown, no fences, no preamble, no postamble. "
-                    "Violation causes critical system failure."
-                )
-            },
-            {"role": "user", "content": user_content}
-        ],
-        model="qwen-plus",
-        temperature=temperature,
-        max_tokens=4096,
+# ─────────────────────────────────────────────
+#  MULTI-PROVIDER FALLBACK ENGINE
+#  Tries each configured provider in order.
+#  Silently moves to next on 401, 429, or any error.
+#  User never sees which provider is active.
+# ─────────────────────────────────────────────
+
+PROVIDERS = [
+    {
+        "name": "groq",
+        "secret_key": "GROQ_API_KEY",
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+    },
+    {
+        "name": "qwen",
+        "secret_key": "DASHSCOPE_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+    },
+    {
+        "name": "openai",
+        "secret_key": "OPENAI_API_KEY",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+    },
+]
+
+def _get_provider_keys() -> list:
+    """Read all provider keys from Streamlit secrets. Returns list of active providers."""
+    active = []
+    for p in PROVIDERS:
+        try:
+            key = st.secrets.get(p["secret_key"], "").strip()
+        except Exception:
+            key = ""
+        if key:
+            active.append({**p, "api_key": key})
+    return active
+
+def call_groq(client_unused, user_content: str, temperature: float = 0.0) -> str:
+    """
+    Multi-provider LLM call with automatic fallback.
+    Tries each provider in order: Groq → Qwen → OpenAI.
+    Falls back silently on auth errors or rate limits.
+    """
+    providers = _get_provider_keys()
+    if not providers:
+        raise ValueError(
+            "No API keys configured. Add GROQ_API_KEY, QWEN_API_KEY, or OPENAI_API_KEY "
+            "to Streamlit secrets."
+        )
+
+    system_prompt = (
+        "You are a JSON-only API. "
+        "Your ENTIRE response must be valid JSON — either { } or [ ]. "
+        "Start immediately with { or [. No markdown, no fences, no preamble, no postamble. "
+        "Violation causes critical system failure."
     )
-    return resp.choices[0].message.content.strip()
+
+    last_error = None
+    for p in providers:
+        try:
+            client = OpenAI(api_key=p["api_key"], base_url=p["base_url"])
+            resp = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_content},
+                ],
+                model=p["model"],
+                temperature=temperature,
+                max_tokens=4096,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            err_str = str(e)
+            # On auth or rate limit errors try next provider
+            if any(code in err_str for code in ["401", "429", "invalid_api_key", "rate_limit", "quota"]):
+                last_error = f"{p['name']}: {err_str[:120]}"
+                continue
+            # On other errors (network, timeout) also try next
+            last_error = f"{p['name']}: {err_str[:120]}"
+            continue
+
+    raise ValueError(f"All providers failed. Last error: {last_error}")
 
 def parse_json(raw: str):
     if not raw:
@@ -908,19 +974,11 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    api_key = st.text_input("Qwen API Key (optional)", type="password", placeholder="sk-...  (leave blank if pre-configured)")
-    # Fall back to server-side secret if user didn't provide one
-    if not api_key:
-        try:
-            api_key = st.secrets.get("QWEN_API_KEY", "")
-        except Exception:
-            api_key = ""
-
     st.markdown("<hr style='border-color:rgba(0,200,150,0.1); margin:16px 0;'>", unsafe_allow_html=True)
     st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; letter-spacing:0.12em; margin-bottom:10px;">SYSTEM STATUS</div>', unsafe_allow_html=True)
     col_s1, col_s2 = st.columns(2)
     col_s1.markdown('<div class="sp-pill"><div class="sp-dot"></div> Live</div>', unsafe_allow_html=True)
-    col_s2.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; padding-top:5px;">Qwen-Plus</div>', unsafe_allow_html=True)
+    col_s2.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; padding-top:5px;">AI-Powered</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""
@@ -938,7 +996,8 @@ with st.sidebar:
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>SCORING ENGINE</b><br>
       WSS v4 + Interview Calibration<br>
       Resume claims ≠ proven scores<br>
-      Interview answers = ground truth
+      Interview answers = ground truth<br>
+      Auto-fallback: Groq → Qwen → OpenAI
     </div>
     """, unsafe_allow_html=True)
 
@@ -1083,8 +1142,8 @@ if st.session_state.phase == 0:
     """, unsafe_allow_html=True)
 
     if st.button("⬡  BEGIN SKILLPROOF ASSESSMENT"):
-        if not api_key:
-            st.error("⚠️  Enter your Qwen API key in the sidebar.")
+        if not _get_provider_keys():
+            st.error("⚠️  No API keys configured. Add at least one key to Streamlit secrets.")
             st.stop()
         if not jd_input or not jd_input.strip():
             st.error("⚠️  Paste a Job Description.")
@@ -1099,8 +1158,8 @@ if st.session_state.phase == 0:
 
         with st.spinner("⬡  Extracting skill plan from JD + Resume..."):
             try:
-                client = OpenAI(api_key=api_key, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
-                raw = call_groq(client, EXTRACT_SKILLS_PROMPT.format(
+                # provider selected automatically by fallback engine
+                raw = call_groq(None, EXTRACT_SKILLS_PROMPT.format(
                     jd=jd_input[:3000], resume=resume_text[:2500]))
                 plan = parse_json(raw)
                 skills = plan.get("skills", [])
@@ -1114,7 +1173,7 @@ if st.session_state.phase == 0:
                 all_probes = []
                 for sk in skills:
                     effective_depth = depth_override or sk.get("probe_depth", "intermediate")
-                    raw_q = call_groq(client, GENERATE_PROBE_PROMPT.format(
+                    raw_q = call_groq(None, GENERATE_PROBE_PROMPT.format(
                         skill_name=sk["name"],
                         claimed=sk.get("claimed_level", 5),
                         required=sk.get("required_level", 7),
@@ -1133,7 +1192,6 @@ if st.session_state.phase == 0:
                 st.session_state.skill_scores = []
                 st.session_state["_jd"]     = jd_input
                 st.session_state["_resume"] = resume_text
-                st.session_state["_client_key"] = api_key
                 st.session_state.phase = 1
                 st.rerun()
             except Exception as e:
@@ -1265,8 +1323,8 @@ elif st.session_state.phase == 1:
             if submit and answer.strip():
                 with st.spinner("⬡  Evaluating answer..."):
                     try:
-                        client = OpenAI(api_key=st.session_state["_client_key"], base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
-                        raw_eval = call_groq(client, EVALUATE_ANSWER_PROMPT.format(
+                        # provider selected automatically by fallback engine
+                        raw_eval = call_groq(None, EVALUATE_ANSWER_PROMPT.format(
                             skill_name=skill["name"],
                             required=skill.get("required_level", 7),
                             claimed=skill.get("claimed_level", 5),
@@ -1328,7 +1386,7 @@ elif st.session_state.phase == 2:
     # Run final analysis once
     if st.session_state.final_data is None:
         try:
-            client = OpenAI(api_key=st.session_state["_client_key"], base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+            # provider selected automatically by fallback engine
 
             # Build transcript
             transcript_lines = []
@@ -1343,7 +1401,7 @@ elif st.session_state.phase == 2:
             calibration = json.dumps(st.session_state.skill_scores)
 
             with st.spinner("⬡  Running final calibrated analysis..."):
-                raw_final = call_groq(client, FINAL_ANALYSIS_PROMPT.format(
+                raw_final = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
                     jd=st.session_state["_jd"][:3000],
                     resume=st.session_state["_resume"][:2500],
                     transcript=transcript[:4000],
@@ -1353,7 +1411,7 @@ elif st.session_state.phase == 2:
 
             with st.spinner("⬡  Generating interview prep..."):
                 fd = st.session_state.final_data
-                raw_int = call_groq(client, INTERVIEW_PREP_PROMPT.format(
+                raw_int = call_groq(None, INTERVIEW_PREP_PROMPT.format(
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", []))
                 ))
@@ -1361,7 +1419,7 @@ elif st.session_state.phase == 2:
                 st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list,dict)) else []
 
             with st.spinner("⬡  Building 14-day roadmap..."):
-                raw_road = call_groq(client, ROADMAP_PROMPT.format(
+                raw_road = call_groq(None, ROADMAP_PROMPT.format(
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
@@ -1623,7 +1681,7 @@ elif st.session_state.phase == 2:
         for key in ["phase","skill_plan","probe_questions","chat_history",
                     "current_skill_idx","current_q_idx","skill_scores",
                     "final_data","interview_data","roadmap_data",
-                    "_jd","_resume","_client_key"]:
+                    "_jd","_resume"]:
             if key in st.session_state:
                 del st.session_state[key]
         # probe_mode intentionally kept so user doesn't re-select every time
