@@ -852,24 +852,26 @@ Return JSON only:
 ]"""
 
 ROADMAP_PROMPT = """Create a 14-day personalised upskilling roadmap.
-Role: '{role}'. Proven weak areas from live interview: {gaps}.
-Candidate proven strengths (use for adjacency reasoning): {strengths}.
+Role: '{role}'. Proven weak areas: {gaps}.
+Candidate strengths (for adjacency): {strengths}.
 
-Prioritise skills by adjacency - how close each gap skill is to what the candidate already knows.
-High adjacency skills come first (faster wins). Low adjacency skills come later.
+Rules:
+- Prioritise high-adjacency skills first (closest to existing strengths)
+- Keep all text fields SHORT — topic max 5 words, activities max 8 words each, labels max 6 words
+- adjacency_note: one short sentence only on day 1 of each new skill block, null otherwise
+- 2 activities max, 2 resources max per day
+- hours: realistic float 1.0-2.0
 
-Each day must include a realistic time estimate (most people have 1-2 hrs/day).
-
-Return JSON only:
+Return JSON only — keep it compact:
 [
   {{
     "day": 1,
-    "topic": "<specific topic>",
+    "topic": "<short topic>",
     "hours": 1.5,
-    "adjacency_note": "<on day 1 of each new skill block: one sentence on why prioritised. null for continuation days>",
-    "activities": ["<activity 1>", "<activity 2>"],
+    "adjacency_note": "<one sentence or null>",
+    "activities": ["<short activity>", "<short activity>"],
     "resources": [
-      {{"label": "<platform: title>", "url": "<real URL>", "type": "video|doc|course|github"}}
+      {{"label": "<short label>", "url": "<real URL>", "type": "video|doc|course|github"}}
     ]
   }}
 ]"""
@@ -980,6 +982,19 @@ def parse_json(raw: str):
         if m:
             try: return json.loads(clean(m.group(1)))
             except: pass
+    # Truncation recovery — model hit token limit mid-array
+    # Find all complete {...} objects inside the array and wrap them
+    cleaned = clean(raw)
+    objects = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}', cleaned)
+    if objects:
+        recovered = []
+        for obj in objects:
+            try:
+                recovered.append(json.loads(clean(obj)))
+            except:
+                pass
+        if recovered:
+            return recovered
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
 
 def unwrap(data):
@@ -1508,7 +1523,7 @@ elif st.session_state.phase == 2:
                     transcript=transcript[:4000],
                     calibration=calibration,
                     skipped_note=skipped_note
-                ), max_tokens=1500)
+                ), max_tokens=2000)
                 st.session_state.final_data = parse_json(raw_final)
 
             with st.spinner("⬡  Generating interview prep..."):
@@ -1516,7 +1531,7 @@ elif st.session_state.phase == 2:
                 raw_int = call_groq(None, INTERVIEW_PREP_PROMPT.format(
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", []))
-                ), max_tokens=1500)
+                ), max_tokens=2000)
                 idata = parse_json(raw_int)
                 st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list,dict)) else []
 
@@ -1525,7 +1540,7 @@ elif st.session_state.phase == 2:
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
-                ), max_tokens=2048)
+                ), max_tokens=3500)
                 rdata = parse_json(raw_road)
                 st.session_state.roadmap_data = unwrap(rdata) if isinstance(rdata, (list,dict)) else []
 
