@@ -1038,7 +1038,7 @@ def _get_provider_keys() -> list:
             active.append({**p, "api_key": key})
     return active
 
-def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True) -> str:
+def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True, max_tokens: int = 4096) -> str:
     """
     Multi-provider LLM call with automatic fallback.
     Tries each provider in order: Groq → Qwen → OpenAI.
@@ -1055,6 +1055,8 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
         "You are a JSON-only API. "
         "Your ENTIRE response must be valid JSON — either { } or [ ]. "
         "Start immediately with { or [. No markdown, no fences, no preamble, no postamble. "
+        "NEVER use markdown formatting (__, **, *, _) inside JSON string values. "
+        "All URLs must be plain text — no surrounding underscores or asterisks. "
         "Violation causes critical system failure."
     )
 
@@ -1069,7 +1071,7 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
                 ],
                 model=p["model"],
                 temperature=temperature,
-                max_tokens=2048,
+                max_tokens=max_tokens,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
@@ -1085,10 +1087,10 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
     raise ValueError(f"All providers failed. Last error: {last_error}")
 
 def _strip_md_artifacts(obj):
-    """Recursively strip markdown artifacts like __url__ bold/italic wrapping from strings."""
     if isinstance(obj, str):
-        # Strip leading/trailing __ (bold) or _ (italic) markdown wrappers
-        s = re.sub(r'^_+|_+$', '', obj.strip())
+        s = obj.strip()
+        # Remove leading/trailing __ or _ markdown wrappers
+        s = re.sub(r'^_+|_+$', '', s)
         return s
     if isinstance(obj, list):
         return [_strip_md_artifacts(i) for i in obj]
@@ -1097,42 +1099,21 @@ def _strip_md_artifacts(obj):
     return obj
 
 def _fix_llm_json(s: str) -> str:
-    """
-    Fix malformed JSON produced by LLMs.
-    Handles the specific pattern where markdown __ bold markers straddle
-    JSON string boundaries, e.g.:
-        "url": "__https://example.com/path",
-        __ "type": "course"
-    becomes:
-        "url": "https://example.com/path",
-        "type": "course"
-    Strategy: scan char by char tracking whether we're inside a JSON string.
-    Inside strings: strip leading/trailing __ from the value.
-    Outside strings: remove bare __ tokens entirely.
-    """
-    # Step 1: strip code fences
+    """Remove markdown artifacts and fix common LLM JSON mistakes."""
+    # Strip code fences
     s = re.sub(r"```json\s*", "", s)
     s = re.sub(r"```\s*", "", s)
-
-    # Step 2: fix the cross-line __ pattern.
-    # The LLM emits:  "url": "__https://...",\n__ "type"
-    # Meaning: __ prefix inside string, __ suffix outside string on next line.
-    # Fix by removing ALL __ tokens everywhere (they are never valid JSON).
-    # Use a line-by-line approach so we can also strip __ that starts a line.
-    lines = s.split('\n')
-    fixed_lines = []
-    for line in lines:
-        # Remove __ that appears at the start of a line (possibly after whitespace)
-        # e.g. `__ "type": "course"` → `"type": "course"`
-        line = re.sub(r'^\s*__\s*', '', line)
-        # Remove __ anywhere else in the line (inside strings, end of values, etc.)
-        line = line.replace('__', '')
-        fixed_lines.append(line)
-    s = '\n'.join(fixed_lines)
-
-    # Step 3: trailing commas before } or ]
+    # Process line by line — __ often appears at start of a line outside strings
+    # e.g:  "url": "__https://...",
+    #       __ "type": "course"
+    fixed = []
+    for line in s.split('\n'):
+        line = re.sub(r'^\s*__\s*', '', line)   # __ at line start (outside string)
+        line = line.replace('__', '')              # __ anywhere else
+        fixed.append(line)
+    s = '\n'.join(fixed)
+    # Trailing commas
     s = re.sub(r",\s*([\}\]])", r"\1", s)
-
     return s.strip()
 
 def parse_json(raw: str):
@@ -1141,34 +1122,32 @@ def parse_json(raw: str):
 
     def try_parse(s):
         try:
-            result = json.loads(s)
-            return _strip_md_artifacts(result)
+            return _strip_md_artifacts(json.loads(s))
         except Exception:
             return None
 
-    # Attempt 1: raw as-is (fast path for well-formed responses)
+    # Pass 1: raw as-is
     r = try_parse(raw)
     if r is not None: return r
 
-    # Attempt 2: apply full cleaning
+    # Pass 2: clean markdown artifacts
     cleaned = _fix_llm_json(raw)
     r = try_parse(cleaned)
     if r is not None: return r
 
-    # Attempt 3: extract outermost JSON array or object
+    # Pass 3: extract array or object block
     for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
         m = re.search(pattern, cleaned)
-        if m:
-            r = try_parse(m.group(1))
-            if r is not None: return r
-
-            # Attempt 4: truncated JSON — salvage up to the last complete item
-            fragment = m.group(1)
-            for end_char in (']', '}'):
-                last = fragment.rfind(end_char)
-                if last > 0:
-                    r = try_parse(fragment[:last + 1])
-                    if r is not None: return r
+        if not m: continue
+        r = try_parse(m.group(1))
+        if r is not None: return r
+        # Pass 4: truncated — salvage up to last complete bracket
+        frag = m.group(1)
+        for ch in (']', '}'):
+            last = frag.rfind(ch)
+            if last > 0:
+                r = try_parse(frag[:last + 1])
+                if r is not None: return r
 
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
 
@@ -1772,7 +1751,7 @@ elif st.session_state.phase == 2:
                     role=fd.get("role", "the role"),
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
-                ))
+                ), max_tokens=6000)
                 return parse_json(raw)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
