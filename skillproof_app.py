@@ -1206,10 +1206,67 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Interview History Panel ──
+    if st.session_state.get("chat_history"):
+        st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
+        st.markdown("""
+        <div style='font-family:Space Mono,monospace; font-size:0.6rem; color:#00c896;
+                    letter-spacing:0.12em; text-transform:uppercase; margin-bottom:12px;
+                    display:flex; align-items:center; gap:8px;'>
+            <span>⬡</span> Interview History
+        </div>
+        """, unsafe_allow_html=True)
+
+        for msg in st.session_state.chat_history:
+            role    = msg.get("role", "")
+            content = msg.get("content", "")
+            if not content:
+                continue
+            if role in ("assistant", "agent"):
+                st.markdown(f"""
+                <div style='background:#0d1220;
+                     border-left:2px solid #00c896;
+                     border-radius:6px;
+                     padding:10px 12px;
+                     margin-bottom:8px;
+                     font-size:0.75rem;
+                     color:#4a6280;
+                     line-height:1.55;
+                     word-break:break-word;'>
+                    <span style='display:block; color:#00c896; font-size:0.58rem;
+                                 letter-spacing:0.1em; margin-bottom:4px;'>
+                        ⬡ SKILLPROOF
+                    </span>
+                    {content}
+                </div>
+                """, unsafe_allow_html=True)
+            elif role == "user":
+                st.markdown(f"""
+                <div style='background:#0c0f1e;
+                     border-left:2px solid rgba(99,102,241,0.4);
+                     border-radius:6px;
+                     padding:10px 12px;
+                     margin-bottom:8px;
+                     font-size:0.75rem;
+                     color:#4a6280;
+                     line-height:1.55;
+                     word-break:break-word;'>
+                    <span style='display:block; color:#818cf8; font-size:0.58rem;
+                                 letter-spacing:0.1em; margin-bottom:4px;'>
+                        YOU
+                    </span>
+                    {content}
+                </div>
+                """, unsafe_allow_html=True)
+
+        if st.button("✕  Clear History", key="clear_hist"):
+            st.session_state.chat_history = []
+            st.rerun()
+
     st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
     st.markdown("""
     <div style='font-family:Space Mono,monospace; font-size:0.55rem; color:#1a2535; text-align:center; line-height:1.8;'>
-      CATALYST HACKATHON 2025<br>
+      CATALYST HACKATHON 2026<br>
       DECCAN AI EXPERTS<br>
       QWEN · QWEN-PLUS
     </div>
@@ -2032,7 +2089,7 @@ elif st.session_state.phase == 2:
     st.markdown("""
     <div style='text-align:center; font-family:Space Mono,monospace; font-size:0.58rem; color:#0d1a2a;
                 padding:20px; border-top:1px solid rgba(255,255,255,0.03); margin-top:24px; letter-spacing:0.1em;'>
-      SKILLPROOF · CATALYST HACKATHON 2025 · DECCAN AI EXPERTS · QWEN · QWEN-PLUS
+      SKILLPROOF · CATALYST HACKATHON 2026 · DECCAN AI EXPERTS · QWEN · QWEN-PLUS
     </div>
     """, unsafe_allow_html=True)
 
