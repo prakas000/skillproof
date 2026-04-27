@@ -904,9 +904,15 @@ SCORING RUBRIC (100 pts):
 
 CRITICAL RULES:
 - Interview answers are ground truth. If resume claims X but interview showed Y, use Y.
-- Skipped questions are NEUTRAL — do not penalise. Fall back to resume evidence for those skills.
 - Do NOT go below 40% unless interview showed complete absence of knowledge.
 - Do NOT go above 92%.
+
+SKILL SCORES — USE THESE EXACTLY, DO NOT CHANGE THEM:
+{calibration}
+
+Each entry has a "skill", "score" (1-10), and "source":
+  source="interview" → proven live score. Use this exactly as "current" in your output.
+  source="resume"    → candidate skipped this skill. Use this exactly as "current". Do NOT lower it. Do NOT treat it as a gap.
 
 JD:
 {jd}
@@ -917,12 +923,6 @@ RESUME:
 INTERVIEW TRANSCRIPT:
 {transcript}
 
-SKILL CALIBRATION (proven scores from live interview — skipped skills excluded):
-{calibration}
-
-SKIPPED SKILLS NOTE:
-{skipped_note}
-
 Return JSON only:
 {{
   "score": <int 0-100>,
@@ -931,16 +931,16 @@ Return JSON only:
   "summary": "<2-sentence honest assessment that references specific interview answers>",
   "skills": [
     {{
-      "name": "<skill>",
+      "name": "<skill — must match names in SKILL SCORES above>",
       "claimed": <1-10 from resume>,
-      "current": <1-10 proven in interview, or resume-inferred if skipped>,
-      "required": <1-10>,
-      "evidence": "<brief note — if skipped write: Not assessed in interview, inferred from resume>"
+      "current": <copy EXACTLY from SKILL SCORES — do not invent or lower>,
+      "required": <1-10 from JD>,
+      "evidence": "<one line: if source=interview describe what answer showed; if source=resume write 'Not assessed — resume level used as-is'>"
     }}
   ],
   "top_gaps": ["<gap 1>", "<gap 2>", "<gap 3>"],
   "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
-  "calibration_note": "<1 sentence on how interview matched or differed from resume claims, mention any skipped skills by name>"
+  "calibration_note": "<1 sentence on interview vs resume claims; name any skipped skills>"
 }}"""
 
 INTERVIEW_PREP_PROMPT = """Senior technical interviewer. Role: '{role}'. Proven weak areas: {gaps}.
@@ -1618,23 +1618,33 @@ elif st.session_state.phase == 2:
                 transcript_lines.append(line)
             transcript = "\n".join(transcript_lines)
 
-            # ── PATCH 2: Clean calibration — no None/null values sent to LLM ──
-            scored = [
-                {"skill": s["skill"], "score": s["score"]}
-                for s in st.session_state.skill_scores
-                if not s.get("skipped") and s.get("score") is not None
-            ]
-            skipped_names = [s["skill"] for s in st.session_state.skill_scores if s.get("skipped")]
-            calibration = json.dumps(scored)
-            skipped_note = (
-                f"Skills NOT assessed in live interview (candidate skipped): {', '.join(skipped_names)}. "
-                f"For these skills, infer current level from resume evidence ONLY — do NOT penalise the overall score."
-                if skipped_names
-                else "All skills were assessed live in the interview."
-            )
+            # Build skill_name → claimed_level lookup from the original plan
+            # Skipped skills use this as their locked "current" score — resume level, not penalised
+            skill_plan_lookup = {
+                sk["name"]: sk.get("claimed_level", 5)
+                for sk in (st.session_state.skill_plan or {}).get("skills", [])
+            }
 
-            # ── PATCH 3: Parallel phase-2 calls ──
-            # Step A: run final analysis first (interview + roadmap depend on its output)
+            # Unified calibration: every skill gets source="interview" or source="resume"
+            # The prompt tells the LLM to copy these scores verbatim — no invention allowed
+            calibration_entries = []
+            for s in st.session_state.skill_scores:
+                if s.get("skipped") or s.get("score") is None:
+                    resume_level = skill_plan_lookup.get(s["skill"], 5)
+                    calibration_entries.append({
+                        "skill":  s["skill"],
+                        "score":  resume_level,
+                        "source": "resume",   # LLM must NOT lower this
+                    })
+                else:
+                    calibration_entries.append({
+                        "skill":  s["skill"],
+                        "score":  s["score"],
+                        "source": "interview",
+                    })
+            calibration = json.dumps(calibration_entries)
+
+            # Step A: final analysis (interview + roadmap depend on its output)
             _final_ph = show_loading(
                 "Compiling your results",
                 "analysis · interview prep · roadmap",
@@ -1650,7 +1660,6 @@ elif st.session_state.phase == 2:
                 resume=st.session_state["_resume"][:2500],
                 transcript=transcript[:4000],
                 calibration=calibration,
-                skipped_note=skipped_note,
             ))
             fd_tmp = parse_json(raw_final)
             st.session_state.final_data = fd_tmp
