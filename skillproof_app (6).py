@@ -532,32 +532,46 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
     100% { transform: translateX(280%); }
 }
 .sp-loader-steps {
-    margin-top: 20px;
+    margin-top: 24px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     text-align: left;
+    background: rgba(0,200,150,0.03);
+    border: 1px solid rgba(0,200,150,0.08);
+    border-radius: 10px;
+    padding: 14px 16px;
 }
 .sp-loader-step {
     font-family: 'Space Mono', monospace;
-    font-size: 0.62rem;
-    color: #1a2a3a;
-    letter-spacing: 0.06em;
+    font-size: 0.63rem;
+    color: #2a3a52;
+    letter-spacing: 0.05em;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    padding: 2px 0;
+    transition: color 0.3s;
 }
 .sp-loader-step.active {
     color: #00c896;
+    font-weight: 700;
 }
 .sp-loader-step.done {
     color: #006b50;
 }
+.sp-loader-step.pending {
+    color: #1a2a3a;
+}
 .sp-loader-step-dot {
-    width: 5px; height: 5px;
+    width: 6px; height: 6px;
     border-radius: 50%;
     flex-shrink: 0;
     background: currentColor;
+}
+.sp-loader-step.active .sp-loader-step-dot {
+    animation: dotPulse 1.4s ease-in-out infinite;
+    box-shadow: 0 0 6px rgba(0,200,150,0.6);
 }
 
 /* ── Status pill ── */
@@ -1663,12 +1677,21 @@ elif st.session_state.phase == 1:
                         # Advance
                         next_qi = qi + 1
                         if next_qi >= total_q_this_skill:
-                            recent_scores = [m["score"] for m in st.session_state.chat_history if m.get("score") is not None]
-                            avg = recent_scores[-1] if recent_scores else 5
+                            # Collect only scores from THIS skill's questions in this session
+                            # Each q produces exactly one score entry in chat_history
+                            # We track them via a temporary accumulator in session_state
+                            skill_q_scores = st.session_state.get("_current_skill_q_scores", [])
+                            skill_q_scores.append(ev_score)
+                            avg = round(sum(skill_q_scores) / len(skill_q_scores)) if skill_q_scores else ev_score
                             st.session_state.skill_scores.append({"skill": skill["name"], "score": avg})
+                            st.session_state["_current_skill_q_scores"] = []  # reset for next skill
                             st.session_state.current_skill_idx += 1
                             st.session_state.current_q_idx = 0
                         else:
+                            # Accumulate this question's score for current skill
+                            skill_q_scores = st.session_state.get("_current_skill_q_scores", [])
+                            skill_q_scores.append(ev_score)
+                            st.session_state["_current_skill_q_scores"] = skill_q_scores
                             st.session_state.current_q_idx = next_qi
 
                     except Exception as e:
@@ -1692,6 +1715,7 @@ elif st.session_state.phase == 1:
                         "skipped": True,
                         "skip_reason": "candidate skipped"
                     })
+                    st.session_state["_current_skill_q_scores"] = []  # reset accumulator
                     st.session_state.current_skill_idx += 1
                     st.session_state.current_q_idx = 0
                 else:
@@ -1804,17 +1828,38 @@ elif st.session_state.phase == 2:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 fut_int  = executor.submit(_fetch_interview)
                 fut_road = executor.submit(_fetch_roadmap)
+                idata_err = rdata_err = None
                 try:
                     idata = fut_int.result(timeout=90)
                 except Exception as e:
                     idata = []
+                    idata_err = str(e)
                 try:
                     rdata = fut_road.result(timeout=90)
                 except Exception as e:
                     rdata = []
+                    rdata_err = str(e)
 
-            st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list, dict)) else []
-            st.session_state.roadmap_data   = unwrap(rdata) if isinstance(rdata, (list, dict)) else []
+            # Unwrap: if result is a dict, pull the first list value (common LLM wrapper)
+            def safe_unwrap(data):
+                if isinstance(data, list): return data
+                if isinstance(data, dict):
+                    # Try known keys first
+                    for k in ("days", "roadmap", "plan", "items", "data"):
+                        if k in data and isinstance(data[k], list):
+                            return data[k]
+                    # Fallback: first list value
+                    for v in data.values():
+                        if isinstance(v, list): return v
+                    # Single dict — wrap in list
+                    if data.get("day"): return [data]
+                return []
+
+            st.session_state.interview_data = safe_unwrap(idata)
+            st.session_state.roadmap_data   = safe_unwrap(rdata)
+            # Store errors for debug display if needed
+            if rdata_err:
+                st.session_state["_roadmap_err"] = rdata_err
             _final_ph.empty()
 
             # ── Save completed assessment to history ──
@@ -2084,7 +2129,8 @@ elif st.session_state.phase == 2:
                     unsafe_allow_html=True
                 )
         else:
-            st.warning("Roadmap unavailable.")
+            err_msg = st.session_state.get("_roadmap_err", "")
+            st.warning(f"Roadmap unavailable. {'Error: ' + err_msg[:120] if err_msg else 'The AI did not return valid roadmap data. Please restart the assessment.'}")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with col_curve:
