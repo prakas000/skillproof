@@ -960,16 +960,19 @@ Return JSON only — no preamble:
 ROADMAP_PROMPT = """You are generating a 14-day upskilling roadmap.
 Role: '{role}'. Skill gaps: {gaps}. Strengths: {strengths}.
 
-OUTPUT RULES — read carefully:
-- Respond with a JSON ARRAY only. Start with [ and end with ].
-- Do NOT wrap in an object. Do NOT add text before or after the array.
-- No markdown, no code fences, no underscores around URLs.
-- Keep ALL strings short (under 60 chars). Use plain URLs only.
-- Exactly 1 resource object per day. 2 activities per day.
-- Output all 14 days.
+OUTPUT RULES:
+- JSON ARRAY only. Start with [ and end with ].
+- No wrapping object. No text before or after. No markdown. No code fences.
+- No underscores in URLs. Plain URLs only.
+- 1 resource per day. 2 short activities per day (under 60 chars each).
+- All 14 days required.
 
-Format (repeat for days 1-14):
-[{"day":1,"topic":"Short Topic","hours":1.5,"adjacency_note":null,"activities":["Act 1","Act 2"],"resources":[{"label":"Site: Title","url":"https://example.com","type":"course"}]},{"day":2,"topic":"Short Topic","hours":1.5,"adjacency_note":"builds on day 1","activities":["Act 1","Act 2"],"resources":[{"label":"Site: Title","url":"https://example.com","type":"doc"}]}]"""
+Respond with ONLY this structure (14 entries total):
+[
+  {{"day":1,"topic":"Topic Name","hours":1.5,"adjacency_note":null,"activities":["Activity one","Activity two"],"resources":[{{"label":"Site: Title","url":"https://example.com","type":"course"}}]}},
+  {{"day":2,"topic":"Topic Name","hours":1.5,"adjacency_note":"builds on day 1","activities":["Activity one","Activity two"],"resources":[{{"label":"Site: Title","url":"https://example.com","type":"doc"}}]}}
+]
+Continue for all 14 days. Replace placeholder text with real content for the role."""
 
 
 # ─────────────────────────────────────────────
@@ -1231,7 +1234,7 @@ with st.sidebar:
       Phase 4 — Calibrated Scoring<br>
       Phase 5 — Career Report<br><br>
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>PROBE MODES</b><br>
-      ⚡ Quick Scan — 2 Q/skill (~12)<br>
+      ⚡ Quick Scan — 1 Q/skill (6 total)<br>
       ⬡ Standard — 2 Q/skill (~12)<br>
       🔬 Deep Probe — 3 Q/skill (~18)<br><br>
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>SCORING ENGINE</b><br>
@@ -1402,7 +1405,7 @@ if st.session_state.phase == 0:
     """, unsafe_allow_html=True)
 
     PROBE_MODES = {
-        "Quick Scan":  {"q_per_skill": 2, "total": "~12 questions", "icon": "⚡", "desc": "Two focused questions per skill across all 6 skills. Balanced and fast — about 10 minutes.", "depth_override": "beginner", "skill_limit": 6},
+        "Quick Scan":  {"q_per_skill": 1, "total": "6 questions", "icon": "⚡", "desc": "One focused question per skill, all 6 skills covered. Fast — about 5 minutes.", "depth_override": "beginner", "skill_limit": 6},
         "Standard":    {"q_per_skill": 2, "total": "~12 questions", "icon": "⬡", "desc": "Two calibrated questions per skill — conceptual + practical. Recommended.", "depth_override": None, "skill_limit": 6},
         "Deep Probe":  {"q_per_skill": 3, "total": "~18 questions", "icon": "🔬", "desc": "Three layered questions per skill for high-stakes roles or senior positions.", "depth_override": "advanced", "skill_limit": 6},
     }
@@ -1747,12 +1750,17 @@ elif st.session_state.phase == 2:
 
             skills_out = []
             proven_scores = []
+            # Build set of skill names that were actually interviewed (present in sc_map)
+            interviewed_skills = set(sc_map.keys())
             for sk_name, sk_info in plan_skills.items():
                 sc_entry  = sc_map.get(sk_name, {})
-                skipped   = sc_entry.get("skipped", False)
+                # A skill is skipped if: explicitly skipped OR never appeared in the interview queue
+                skipped   = sc_entry.get("skipped", False) or (sk_name not in interviewed_skills)
                 claimed   = sk_info.get("claimed_level", 5)
                 required  = sk_info.get("required_level", 7)
-                proven    = None if skipped else int(sc_entry.get("score") or claimed)
+                # proven is None for any skipped/unassessed skill — never use claimed as proxy
+                raw_score = sc_entry.get("score")
+                proven    = None if (skipped or raw_score is None) else int(raw_score)
                 evidence  = "Skipped — not assessed in interview." if skipped else "Scored from live interview answers."
                 skills_out.append({
                     "name":     sk_name,
@@ -1762,7 +1770,7 @@ elif st.session_state.phase == 2:
                     "skipped":  skipped,
                     "evidence": evidence,
                 })
-                if not skipped:
+                if proven is not None:
                     proven_scores.append(proven)
 
             # Weighted proof score: 50% proven skills avg, 30% domain fit, 20% experience baseline
