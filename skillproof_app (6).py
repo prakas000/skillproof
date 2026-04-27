@@ -458,10 +458,10 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
     background: #080c18;
     border: 1px solid rgba(0,200,150,0.18);
     border-radius: 20px;
-    padding: 44px 52px;
+    padding: 40px 44px;
     text-align: center;
-    max-width: 420px;
-    width: 90%;
+    max-width: 440px;
+    width: 92%;
     box-shadow: 0 0 80px rgba(0,200,150,0.08), 0 0 0 1px rgba(0,200,150,0.06);
     animation: fadeInUp 0.35s ease;
 }
@@ -541,6 +541,8 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
     border: 1px solid rgba(0,200,150,0.08);
     border-radius: 10px;
     padding: 14px 16px;
+    width: 100%;
+    box-sizing: border-box;
 }
 .sp-loader-step {
     font-family: 'Space Mono', monospace;
@@ -551,7 +553,9 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
     align-items: center;
     gap: 10px;
     padding: 2px 0;
-    transition: color 0.3s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .sp-loader-step.active {
     color: #00c896;
@@ -1001,7 +1005,7 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
               {icon} {label}
             </div>'''
 
-    placeholder.markdown(f"""<div style="height:0;overflow:hidden;line-height:0;font-size:0;">
+    placeholder.markdown(f"""
     <div class="sp-loading-overlay">
       <div class="sp-loading-card">
         <div class="sp-loader-hex">{HEX_SVG}</div>
@@ -1017,7 +1021,6 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
         </div>
         {'<div class="sp-loader-steps">' + steps_html + '</div>' if steps_html else ''}
       </div>
-    </div>
     </div>""", unsafe_allow_html=True)
     return placeholder
 
@@ -1228,7 +1231,7 @@ with st.sidebar:
       Phase 4 — Calibrated Scoring<br>
       Phase 5 — Career Report<br><br>
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>PROBE MODES</b><br>
-      ⚡ Quick Scan — 1 Q/skill (~4)<br>
+      ⚡ Quick Scan — 2 Q/skill (~12)<br>
       ⬡ Standard — 2 Q/skill (~12)<br>
       🔬 Deep Probe — 3 Q/skill (~18)<br><br>
       <b style='color:#3a5070; font-family:Space Mono,monospace; font-size:0.65rem;'>SCORING ENGINE</b><br>
@@ -1399,7 +1402,7 @@ if st.session_state.phase == 0:
     """, unsafe_allow_html=True)
 
     PROBE_MODES = {
-        "Quick Scan":  {"q_per_skill": 1, "total": "~4 questions", "icon": "⚡", "desc": "One focused question per skill. Fast and efficient — takes about 5 minutes.", "depth_override": "beginner", "skill_limit": 4},
+        "Quick Scan":  {"q_per_skill": 2, "total": "~12 questions", "icon": "⚡", "desc": "Two focused questions per skill across all 6 skills. Balanced and fast — about 10 minutes.", "depth_override": "beginner", "skill_limit": 6},
         "Standard":    {"q_per_skill": 2, "total": "~12 questions", "icon": "⬡", "desc": "Two calibrated questions per skill — conceptual + practical. Recommended.", "depth_override": None, "skill_limit": 6},
         "Deep Probe":  {"q_per_skill": 3, "total": "~18 questions", "icon": "🔬", "desc": "Three layered questions per skill for high-stakes roles or senior positions.", "depth_override": "advanced", "skill_limit": 6},
     }
@@ -1823,7 +1826,15 @@ elif st.session_state.phase == 2:
                     gaps=", ".join(fd.get("top_gaps", [])),
                     strengths=", ".join(fd.get("strengths", []))
                 ), max_tokens=8000)
-                return parse_json(raw)
+                result = parse_json(raw)
+                # Validate: must be a list of dicts each containing "day"
+                if isinstance(result, list):
+                    valid = [d for d in result if isinstance(d, dict) and "day" in d]
+                    if valid:
+                        return valid
+                if isinstance(result, dict) and "day" in result:
+                    return [result]
+                raise ValueError(f"Roadmap parse returned unexpected type: {type(result).__name__} — value: {repr(str(result)[:80])}")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 fut_int  = executor.submit(_fetch_interview)
@@ -1842,17 +1853,22 @@ elif st.session_state.phase == 2:
 
             # Unwrap: if result is a dict, pull the first list value (common LLM wrapper)
             def safe_unwrap(data):
-                if isinstance(data, list): return data
+                if isinstance(data, list):
+                    # Filter to only valid day-dicts
+                    valid = [d for d in data if isinstance(d, dict) and "day" in d]
+                    return valid if valid else data
                 if isinstance(data, dict):
                     # Try known keys first
                     for k in ("days", "roadmap", "plan", "items", "data"):
                         if k in data and isinstance(data[k], list):
                             return data[k]
+                    # Single dict with day key — wrap in list
+                    if "day" in data:
+                        return [data]
                     # Fallback: first list value
                     for v in data.values():
                         if isinstance(v, list): return v
-                    # Single dict — wrap in list
-                    if data.get("day"): return [data]
+                # String, int, or other — return empty
                 return []
 
             st.session_state.interview_data = safe_unwrap(idata)
