@@ -6,6 +6,7 @@ import json
 import re
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor   # PATCH 3: parallel calls
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
@@ -633,11 +634,7 @@ hr { border-color: rgba(255,255,255,0.05) !important; }
 
 
 # ─────────────────────────────────────────────
-#  SVG LOGO — Fingerprint resolving into a checkmark
-#  Concept: identity verification + proof of skill
-#  The ridgelines of a fingerprint curve inward and
-#  the central whorl morphs into a clean tick mark —
-#  visually encoding "your identity, verified".
+#  SVG LOGO
 # ─────────────────────────────────────────────
 SKILLPROOF_LOGO_SVG = """
 <svg viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg" class="sp-hex">
@@ -647,34 +644,16 @@ SKILLPROOF_LOGO_SVG = """
       <stop offset="100%" stop-color="#00c896" stop-opacity="0"/>
     </radialGradient>
   </defs>
-
-  <!-- glow backdrop -->
   <circle cx="28" cy="28" r="26" fill="url(#fpGlow)"/>
-
-  <!-- outer ring -->
   <circle cx="28" cy="28" r="25" stroke="#00c896" stroke-width="1" stroke-opacity="0.18"/>
-
-  <!-- fingerprint ridgelines — concentric open arcs, each slightly offset
-       to mimic the loop/whorl pattern of a real fingerprint -->
-  <!-- ridge 1 — outermost -->
   <path d="M 10 34 Q 10 8 28 8 Q 46 8 46 34" stroke="#00c896" stroke-width="1.4" stroke-opacity="0.35" fill="none" stroke-linecap="round"/>
-  <!-- ridge 2 -->
   <path d="M 13 36 Q 13 12 28 12 Q 43 12 43 36" stroke="#00c896" stroke-width="1.4" stroke-opacity="0.45" fill="none" stroke-linecap="round"/>
-  <!-- ridge 3 -->
   <path d="M 16 37 Q 16 16 28 16 Q 40 16 40 37" stroke="#00c896" stroke-width="1.4" stroke-opacity="0.55" fill="none" stroke-linecap="round"/>
-  <!-- ridge 4 -->
   <path d="M 19 38 Q 19 20 28 20 Q 37 20 37 38" stroke="#00c896" stroke-width="1.5" stroke-opacity="0.65" fill="none" stroke-linecap="round"/>
-  <!-- ridge 5 — innermost, broken in centre to make room for check -->
   <path d="M 22 38 Q 22 23 28 23" stroke="#00c896" stroke-width="1.5" stroke-opacity="0.8" fill="none" stroke-linecap="round"/>
   <path d="M 28 23 Q 34 23 34 38" stroke="#00c896" stroke-width="1.5" stroke-opacity="0.8" fill="none" stroke-linecap="round"/>
-
-  <!-- checkmark — sits at the whorl centre, crisp and bold -->
-  <!-- left arm of tick -->
   <line x1="22" y1="30" x2="26.5" y2="35" stroke="#00c896" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- right arm of tick (longer) -->
   <line x1="26.5" y1="35" x2="35" y2="24" stroke="#00c896" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <!-- small glow dot at tick apex -->
   <circle cx="26.5" cy="35" r="1.8" fill="#00c896" opacity="0.7"/>
 </svg>
 """
@@ -739,9 +718,8 @@ def make_gauge(score: int) -> go.Figure:
 
 def make_bar_chart(skills: list) -> go.Figure:
     names    = [s["name"] for s in skills]
-    claimed  = [s.get("claimed", 5) for s in skills]
-    # For skipped skills (current is None), show claimed value with different color via customdata
-    proven   = [s["current"] if s["current"] is not None else None for s in skills]
+    claimed  = [s.get("claimed", s["current"]) for s in skills]
+    proven   = [s["current"] for s in skills]
     required = [s["required"] for s in skills]
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -774,11 +752,9 @@ def make_bar_chart(skills: list) -> go.Figure:
 
 def make_radar(skills: list) -> go.Figure:
     cats     = [s["name"] for s in skills] + [skills[0]["name"]]
-    # For skipped skills, use claimed as fallback so the radar doesn't break on None
-    proven   = [(s["current"] if s["current"] is not None else s.get("claimed", 5)) for s in skills]
-    proven   = proven + [proven[0]]
+    proven   = [s["current"] for s in skills] + [skills[0]["current"]]
     required = [s["required"] for s in skills] + [skills[0]["required"]]
-    claimed  = [s.get("claimed", 5) for s in skills] + [skills[0].get("claimed", 5)]
+    claimed  = [s.get("claimed", s["current"]) for s in skills] + [skills[0].get("claimed", skills[0]["current"])]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=required, theta=cats, fill="toself", name="Required",
         line_color="#fbbf24", fillcolor="rgba(251,191,36,0.06)"))
@@ -919,48 +895,97 @@ Return JSON only:
   "revealed_gap": "<null or specific knowledge gap revealed>"
 }}"""
 
-FINAL_ANALYSIS_PROMPT = """Score this candidate. Interview answers override resume claims.
-Rules: 50pts proven skills, 30pts domain fit, 20pts experience. Range: 40-92.
+FINAL_ANALYSIS_PROMPT = """Analyse this candidate using BOTH the resume AND the conversational interview transcript.
+
+SCORING RUBRIC (100 pts):
+  A) Proven Technical Skills (from interview) — 50 pts  <- WEIGHT THIS MOST
+  B) Domain Transferability                   — 30 pts
+  C) Academic Background & Experience         — 20 pts
+
+CRITICAL RULES:
+- Interview answers are ground truth. If resume claims X but interview showed Y, use Y.
+- Skipped questions are NEUTRAL — do not penalise. Fall back to resume evidence for those skills.
+- Do NOT go below 40% unless interview showed complete absence of knowledge.
+- Do NOT go above 92%.
+
+JD:
+{jd}
+
+RESUME:
+{resume}
+
+INTERVIEW TRANSCRIPT:
+{transcript}
+
+SKILL CALIBRATION (proven scores from live interview — skipped skills excluded):
+{calibration}
+
+SKIPPED SKILLS NOTE:
 {skipped_note}
 
-JD (excerpt): {jd}
-RESUME (excerpt): {resume}
-INTERVIEW: {transcript}
-CALIBRATION: {calibration}
+Return JSON only:
+{{
+  "score": <int 0-100>,
+  "resume_score": <int, what score would have been from resume alone>,
+  "role": "<most specific relevant job title>",
+  "summary": "<2-sentence honest assessment that references specific interview answers>",
+  "skills": [
+    {{
+      "name": "<skill>",
+      "claimed": <1-10 from resume>,
+      "current": <1-10 proven in interview, or resume-inferred if skipped>,
+      "required": <1-10>,
+      "evidence": "<brief note — if skipped write: Not assessed in interview, inferred from resume>"
+    }}
+  ],
+  "top_gaps": ["<gap 1>", "<gap 2>", "<gap 3>"],
+  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
+  "calibration_note": "<1 sentence on how interview matched or differed from resume claims, mention any skipped skills by name>"
+}}"""
+
+INTERVIEW_PREP_PROMPT = """Senior technical interviewer. Role: '{role}'. Proven weak areas: {gaps}.
+
+Generate 8 interview Q&As (mix: 2 conceptual, 4 technical, 2 behavioural). Base answers on what a strong candidate would say.
 
 Return JSON only:
-{{"score":<int>,"resume_score":<int>,"role":"<title>","summary":"<2 sentences>",
-"skills":[{{"name":"<s>","claimed":<1-10>,"current":<1-10>,"required":<1-10>,"evidence":"<brief>"}}],
-"top_gaps":["<g1>","<g2>","<g3>"],"strengths":["<s1>","<s2>","<s3>"],
-"calibration_note":"<1 sentence>"}}"""
+[
+  {{
+    "num": 1,
+    "type": "Conceptual",
+    "q": "<question>",
+    "a": "<2-3 sentence model answer>",
+    "tip": "<practical preparation tip>"
+  }}
+]"""
 
-INTERVIEW_PREP_PROMPT = """Technical interviewer. Role: '{role}'. Weak areas: {gaps}.
-Generate 6 interview Q&As (2 conceptual, 3 technical, 1 behavioural).
-Return JSON only — no preamble:
-[{{"num":1,"type":"Conceptual","q":"<question>","a":"<1-2 sentence answer>","tip":"<one tip>"}}]"""
+ROADMAP_PROMPT = """Create a 14-day personalised upskilling roadmap.
+Role: '{role}'. Proven weak areas from live interview: {gaps}.
+Candidate proven strengths (use for adjacency reasoning): {strengths}.
 
-ROADMAP_PROMPT = """You are generating a 14-day upskilling roadmap.
-Role: '{role}'. Skill gaps: {gaps}. Strengths: {strengths}.
+Prioritise skills by adjacency - how close each gap skill is to what the candidate already knows.
+High adjacency skills come first (faster wins). Low adjacency skills come later.
 
-OUTPUT RULES — read carefully:
-- Respond with a JSON ARRAY only. Start with [ and end with ].
-- Do NOT wrap in an object. Do NOT add text before or after the array.
-- No markdown, no code fences, no underscores around URLs.
-- Keep ALL strings short (under 60 chars). Use plain URLs only.
-- Exactly 1 resource object per day. 2 activities per day.
-- Output all 14 days.
+Each day must include a realistic time estimate (most people have 1-2 hrs/day).
 
-Format (repeat for days 1-14):
-[{"day":1,"topic":"Short Topic","hours":1.5,"adjacency_note":null,"activities":["Act 1","Act 2"],"resources":[{"label":"Site: Title","url":"https://example.com","type":"course"}]},{"day":2,"topic":"Short Topic","hours":1.5,"adjacency_note":"builds on day 1","activities":["Act 1","Act 2"],"resources":[{"label":"Site: Title","url":"https://example.com","type":"doc"}]}]"""
+Return JSON only:
+[
+  {{
+    "day": 1,
+    "topic": "<specific topic>",
+    "hours": 1.5,
+    "adjacency_note": "<on day 1 of each new skill block: one sentence on why prioritised. null for continuation days>",
+    "activities": ["<activity 1>", "<activity 2>"],
+    "resources": [
+      {{"label": "<platform: title>", "url": "<real URL>", "type": "video|doc|course|github"}}
+    ]
+  }}
+]"""
 
 
 # ─────────────────────────────────────────────
 #  LLM CALL + PARSE
 # ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-#  ANIMATED LOADING OVERLAYS
-# ─────────────────────────────────────────────
 HEX_SVG = """<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
   <polygon points="50,2 93,26 93,74 50,98 7,74 7,26"
            fill="none" stroke="#00c896" stroke-width="3" stroke-linejoin="round"
@@ -970,12 +995,7 @@ HEX_SVG = """<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
   <circle cx="50" cy="50" r="6" fill="#00c896" opacity="0.9"/>
 </svg>"""
 
-def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None = None):
-    """
-    Display a full-screen animated loading overlay.
-    steps: list of (label, status) where status is "active"|"done"|"pending"
-    Returns the st.empty() placeholder so caller can clear it.
-    """
+def show_loading(title: str, subtitle: str, steps: list | None = None):
     placeholder = st.empty()
     steps_html = ""
     if steps:
@@ -987,7 +1007,7 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
               {icon} {label}
             </div>'''
 
-    placeholder.markdown(f"""<div style="height:0;overflow:hidden;line-height:0;font-size:0;">
+    placeholder.markdown(f"""
     <div class="sp-loading-overlay">
       <div class="sp-loading-card">
         <div class="sp-loader-hex">{HEX_SVG}</div>
@@ -1004,14 +1024,11 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
         {'<div class="sp-loader-steps">' + steps_html + '</div>' if steps_html else ''}
       </div>
     </div>
-    </div>""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
     return placeholder
 
 # ─────────────────────────────────────────────
 #  MULTI-PROVIDER FALLBACK ENGINE
-#  Tries each configured provider in order.
-#  Silently moves to next on 401, 429, or any error.
-#  User never sees which provider is active.
 # ─────────────────────────────────────────────
 
 PROVIDERS = [
@@ -1019,7 +1036,7 @@ PROVIDERS = [
         "name": "groq",
         "secret_key": "GROQ_API_KEY",
         "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.1-8b-instant",   # fast model — 3-4x quicker than 70b
+        "model": "llama-3.1-8b-instant",
     },
     {
         "name": "qwen",
@@ -1036,7 +1053,6 @@ PROVIDERS = [
 ]
 
 def _get_provider_keys() -> list:
-    """Read all provider keys from Streamlit secrets. Returns list of active providers."""
     active = []
     for p in PROVIDERS:
         try:
@@ -1047,12 +1063,7 @@ def _get_provider_keys() -> list:
             active.append({**p, "api_key": key})
     return active
 
-def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True, max_tokens: int = 4096) -> str:
-    """
-    Multi-provider LLM call with automatic fallback.
-    Tries each provider in order: Groq → Qwen → OpenAI.
-    Falls back silently on auth errors or rate limits.
-    """
+def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: bool = True) -> str:
     providers = _get_provider_keys()
     if not providers:
         raise ValueError(
@@ -1064,8 +1075,6 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
         "You are a JSON-only API. "
         "Your ENTIRE response must be valid JSON — either { } or [ ]. "
         "Start immediately with { or [. No markdown, no fences, no preamble, no postamble. "
-        "NEVER use markdown formatting (__, **, *, _) inside JSON string values. "
-        "All URLs must be plain text — no surrounding underscores or asterisks. "
         "Violation causes critical system failure."
     )
 
@@ -1080,109 +1089,35 @@ def call_groq(client_unused, user_content: str, temperature: float = 0.0, fast: 
                 ],
                 model=p["model"],
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=4096,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
             err_str = str(e)
-            # On auth or rate limit errors try next provider
             if any(code in err_str for code in ["401", "429", "invalid_api_key", "rate_limit", "quota"]):
                 last_error = f"{p['name']}: {err_str[:120]}"
                 continue
-            # On other errors (network, timeout) also try next
             last_error = f"{p['name']}: {err_str[:120]}"
             continue
 
     raise ValueError(f"All providers failed. Last error: {last_error}")
 
-def _strip_md_artifacts(obj):
-    if isinstance(obj, str):
-        s = obj.strip()
-        # Remove leading/trailing __ or _ markdown wrappers
-        s = re.sub(r'^_+|_+$', '', s)
-        return s
-    if isinstance(obj, list):
-        return [_strip_md_artifacts(i) for i in obj]
-    if isinstance(obj, dict):
-        return {k: _strip_md_artifacts(v) for k, v in obj.items()}
-    return obj
-
-def _fix_llm_json(s: str) -> str:
-    """Remove markdown artifacts and fix common LLM JSON mistakes."""
-    # Strip code fences
-    s = re.sub(r"```json\s*", "", s)
-    s = re.sub(r"```\s*", "", s)
-    # Process line by line — __ often appears at start of a line outside strings
-    # e.g:  "url": "__https://...",
-    #       __ "type": "course"
-    fixed = []
-    for line in s.split('\n'):
-        line = re.sub(r'^\s*__\s*', '', line)   # __ at line start (outside string)
-        line = line.replace('__', '')              # __ anywhere else
-        fixed.append(line)
-    s = '\n'.join(fixed)
-    # Trailing commas
-    s = re.sub(r",\s*([\}\]])", r"\1", s)
-    return s.strip()
-
 def parse_json(raw: str):
     if not raw:
         raise ValueError("Empty response.")
-
-    def try_parse(s):
-        try:
-            return _strip_md_artifacts(json.loads(s))
-        except Exception:
-            return None
-
-    def salvage_array(s):
-        """Extract all complete {...} objects from a truncated/broken array."""
-        objects = []
-        depth = 0
-        start = None
-        for i, ch in enumerate(s):
-            if ch == '{':
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0 and start is not None:
-                    try:
-                        obj = json.loads(s[start:i+1])
-                        objects.append(_strip_md_artifacts(obj))
-                    except Exception:
-                        pass
-                    start = None
-        return objects if objects else None
-
-    # Pass 1: raw as-is
-    r = try_parse(raw)
-    if r is not None: return r
-
-    # Pass 2: clean __ markdown artifacts
-    cleaned = _fix_llm_json(raw)
-    r = try_parse(cleaned)
-    if r is not None: return r
-
-    # Pass 3: extract outermost array or object
-    for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
-        m = re.search(pattern, cleaned)
-        if not m: continue
-        r = try_parse(m.group(1))
-        if r is not None: return r
-        # Pass 4: truncated — walk back to last valid closing bracket
-        frag = m.group(1)
-        for ch in (']', '}'):
-            last = frag.rfind(ch)
-            if last > 0:
-                r = try_parse(frag[:last + 1])
-                if r is not None: return r
-
-    # Pass 5: last resort — salvage every complete object individually
-    r = salvage_array(cleaned)
-    if r: return r
-
+    def clean(s):
+        s = re.sub(r"```json\s*", "", s)
+        s = re.sub(r"```\s*", "", s)
+        s = re.sub(r",\s*([\}\]])", r"\1", s)
+        return s.strip()
+    for attempt in [raw, clean(raw)]:
+        try: return json.loads(attempt)
+        except: pass
+    for pattern in [r"(\{[\s\S]*\})", r"(\[[\s\S]*\])"]:
+        m = re.search(pattern, clean(raw))
+        if m:
+            try: return json.loads(clean(m.group(1)))
+            except: pass
     raise ValueError(f"Cannot parse JSON. First 400 chars: {repr(raw[:400])}")
 
 def unwrap(data):
@@ -1231,68 +1166,10 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Assessment History Panel (ChatGPT-style) ──
-    history = st.session_state.get("assessment_history", [])
-    if history:
-        st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
-        st.markdown("""
-        <div style='font-family:Space Mono,monospace; font-size:0.6rem; color:#00c896;
-                    letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px;'>
-            ⬡ Past Assessments
-        </div>
-        """, unsafe_allow_html=True)
-
-        for i, entry in enumerate(history):
-            role_title  = entry.get("role", "Unknown Role")
-            score_val   = entry.get("score", 0)
-            timestamp   = entry.get("timestamp", "")
-            score_clr   = "#34d399" if score_val >= 70 else "#fbbf24" if score_val >= 50 else "#f87171"
-            is_active   = st.session_state.get("_viewing_history_id") == entry["id"]
-            bg     = "rgba(0,200,150,0.07)" if is_active else "rgba(18,22,48,0.98)"
-            border = "#00c896" if is_active else "rgba(99,102,241,0.25)"
-            short_title = role_title[:26] + ("…" if len(role_title) > 26 else "")
-
-            st.markdown(f"""
-            <div style='background:{bg};
-                        border:1px solid {border};
-                        border-left:3px solid {score_clr};
-                        border-radius:8px;
-                        padding:10px 12px;
-                        margin-bottom:6px;
-                        box-shadow:0 2px 8px rgba(0,0,0,0.45);'>
-              <div style='font-family:Syne,sans-serif; font-size:0.78rem; font-weight:600;
-                          color:#d0dcf4; margin-bottom:5px; line-height:1.3;'
-                   title='{role_title}'>{short_title}</div>
-              <div style='display:flex; justify-content:space-between; align-items:center;'>
-                <span style='font-family:Space Mono,monospace; font-size:0.68rem;
-                             font-weight:700; color:{score_clr};
-                             background:rgba(0,0,0,0.3); padding:1px 7px; border-radius:4px;'
-                >{score_val}%</span>
-                <span style='font-family:Space Mono,monospace; font-size:0.54rem;
-                             color:#3a4a62;'>{timestamp}</span>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            if st.button(f"↗ View report", key=f"hist_{entry['id']}"):
-                st.session_state.final_data          = entry["final_data"]
-                st.session_state.interview_data      = entry["interview_data"]
-                st.session_state.roadmap_data        = entry["roadmap_data"]
-                st.session_state.skill_scores        = entry["skill_scores"]
-                st.session_state.chat_history        = entry["chat_history"]
-                st.session_state._viewing_history_id = entry["id"]
-                st.session_state.phase = 2
-                st.rerun()
-
-        if st.button("✕  Clear All History", key="clear_all_hist"):
-            st.session_state.assessment_history     = []
-            st.session_state._viewing_history_id    = None
-            st.rerun()
-
     st.markdown("<hr style='border-color:rgba(0,200,150,0.08); margin:16px 0;'>", unsafe_allow_html=True)
     st.markdown("""
     <div style='font-family:Space Mono,monospace; font-size:0.55rem; color:#1a2535; text-align:center; line-height:1.8;'>
-      CATALYST HACKATHON 2026<br>
+      CATALYST HACKATHON 2025<br>
       DECCAN AI EXPERTS<br>
       QWEN · QWEN-PLUS
     </div>
@@ -1309,7 +1186,7 @@ for key in ["phase", "skill_plan", "probe_questions", "chat_history",
         st.session_state[key] = None if key in ["skill_plan","probe_questions","final_data","interview_data","roadmap_data"] else ([] if key in ["chat_history","skill_scores"] else 0)
 
 if st.session_state.phase is None:
-    st.session_state.phase = 0  # 0=input, 1=probing, 2=results
+    st.session_state.phase = 0
 
 
 # ─────────────────────────────────────────────
@@ -1325,7 +1202,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Phase stepper
 phases = ["01 · Input", "02 · Probe", "03 · Score", "04 · Roadmap"]
 phase_html = '<div class="phase-bar">'
 for i, p in enumerate(phases):
@@ -1363,7 +1239,6 @@ if st.session_state.phase == 0:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Probe depth selector ──
     st.markdown('<div class="sp-section">⬡ Choose Assessment Depth</div>', unsafe_allow_html=True)
     st.markdown("""
     <style>
@@ -1403,8 +1278,6 @@ if st.session_state.phase == 0:
     for col, (mode_name, mode_cfg) in zip([mc1, mc2, mc3], PROBE_MODES.items()):
         with col:
             selected = st.session_state.probe_mode == mode_name
-            border = "#00c896" if selected else "rgba(255,255,255,0.06)"
-            bg     = "rgba(0,200,150,0.06)" if selected else "#080c18"
             tick   = "✓ " if selected else ""
             st.markdown(f"""
             <div class="probe-card {'selected' if selected else ''}">
@@ -1414,14 +1287,12 @@ if st.session_state.phase == 0:
               <div class="probe-desc">{mode_cfg['desc']}</div>
             </div>
             """, unsafe_allow_html=True)
-            if st.button(f"Select {mode_name}", key=f"mode_{mode_name}",
-                         help=mode_cfg["desc"]):
+            if st.button(f"Select {mode_name}", key=f"mode_{mode_name}", help=mode_cfg["desc"]):
                 st.session_state.probe_mode = mode_name
                 st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Show selected mode summary
     sel = PROBE_MODES[st.session_state.probe_mode]
     st.markdown(f"""
     <div style='font-family:Space Mono,monospace; font-size:0.68rem; color:#006b50; text-align:center; margin-bottom:18px; letter-spacing:0.08em;'>
@@ -1444,59 +1315,90 @@ if st.session_state.phase == 0:
             st.error("⚠️  Could not extract PDF text. Ensure it is not a scanned image.")
             st.stop()
 
-        with st.spinner("Analysing your profile and building interview questions..."):
-            try:
-                raw = call_groq(None, EXTRACT_SKILLS_PROMPT.format(
-                    jd=jd_input[:3000], resume=resume_text[:2500]))
-                plan = parse_json(raw)
-                skills = plan.get("skills", [])
+        _loader = show_loading(
+            "Analysing your profile",
+            "reading resume · mapping skills · preparing questions",
+            steps=[
+                ("Parsing resume & JD", "active"),
+                ("Extracting critical skills", "pending"),
+                ("Preparing interview questions", "pending"),
+            ]
+        )
+        try:
+            raw = call_groq(None, EXTRACT_SKILLS_PROMPT.format(
+                jd=jd_input[:3000], resume=resume_text[:2500]))
+            plan = parse_json(raw)
+            skills = plan.get("skills", [])
 
-                sel_mode       = PROBE_MODES[st.session_state.probe_mode]
-                q_per_skill    = sel_mode["q_per_skill"]
-                depth_override = sel_mode["depth_override"]
-                skill_limit    = sel_mode.get("skill_limit", 6)
+            sel_mode       = PROBE_MODES[st.session_state.probe_mode]
+            q_per_skill    = sel_mode["q_per_skill"]
+            depth_override = sel_mode["depth_override"]
+            skill_limit    = sel_mode.get("skill_limit", 6)
 
-                all_probes = []
-                skills_subset = skills[:skill_limit]
-                skills_info = json.dumps([
-                    {
-                        "name": sk["name"],
-                        "claimed": sk.get("claimed_level", 5),
-                        "required": sk.get("required_level", 7),
-                        "depth": depth_override or sk.get("probe_depth", "intermediate")
-                    }
-                    for sk in skills_subset
-                ])
-                batch_prompt = BATCH_PROBE_PROMPT.format(
-                    role=plan.get("role", "the role"),
-                    q_per_skill=q_per_skill,
-                    skills_json=skills_info
-                )
-                raw_batch = call_groq(None, batch_prompt)
-                batch_result = parse_json(raw_batch)
-                if isinstance(batch_result, dict):
-                    batch_result = next(iter(batch_result.values()), [])
-                for entry in batch_result:
-                    skill_name = entry.get("skill_name", "")
-                    sk = next((s for s in skills_subset if s["name"] == skill_name), None)
-                    if sk is None and skills_subset:
-                        sk = skills_subset[len(all_probes) % len(skills_subset)]
-                    qs = entry.get("questions", [])
-                    if sk and qs:
-                        all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
+            _loader.markdown(f"""
+            <div class="sp-loading-overlay">
+              <div class="sp-loading-card">
+                <div class="sp-loader-hex">{HEX_SVG}</div>
+                <div class="sp-loader-title">Building your interview</div>
+                <div class="sp-loader-sub">generating calibrated questions</div>
+                <div class="sp-loader-dots">
+                  <div class="sp-loader-dot"></div>
+                  <div class="sp-loader-dot"></div>
+                  <div class="sp-loader-dot"></div>
+                </div>
+                <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
+                <div class="sp-loader-steps">
+                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Parsed resume &amp; JD</div>
+                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Extracted {len(skills)} critical skills</div>
+                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview questions</div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-                st.session_state.skill_plan      = plan
-                st.session_state.probe_questions = all_probes
-                st.session_state.chat_history    = []
-                st.session_state.current_skill_idx = 0
-                st.session_state.current_q_idx     = 0
-                st.session_state.skill_scores      = []
-                st.session_state["_jd"]            = jd_input
-                st.session_state["_resume"]        = resume_text
-                st.session_state.phase             = 1
-            except Exception as e:
-                st.error(f"❌  Skill extraction failed: {e}")
-        st.rerun()
+            all_probes = []
+            skills_subset = skills[:skill_limit]
+            skills_info = json.dumps([
+                {
+                    "name": sk["name"],
+                    "claimed": sk.get("claimed_level", 5),
+                    "required": sk.get("required_level", 7),
+                    "depth": depth_override or sk.get("probe_depth", "intermediate")
+                }
+                for sk in skills_subset
+            ])
+            batch_prompt = BATCH_PROBE_PROMPT.format(
+                role=plan.get("role", "the role"),
+                q_per_skill=q_per_skill,
+                skills_json=skills_info
+            )
+            raw_batch = call_groq(None, batch_prompt)
+            batch_result = parse_json(raw_batch)
+            if isinstance(batch_result, dict):
+                batch_result = next(iter(batch_result.values()), [])
+            for entry in batch_result:
+                skill_name = entry.get("skill_name", "")
+                sk = next((s for s in skills_subset if s["name"] == skill_name), None)
+                if sk is None and skills_subset:
+                    sk = skills_subset[len(all_probes) % len(skills_subset)]
+                qs = entry.get("questions", [])
+                if sk and qs:
+                    all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
+
+            _loader.empty()
+            st.session_state.skill_plan   = plan
+            st.session_state.probe_questions = all_probes
+            st.session_state.chat_history = []
+            st.session_state.current_skill_idx = 0
+            st.session_state.current_q_idx     = 0
+            st.session_state.skill_scores = []
+            st.session_state["_jd"]     = jd_input
+            st.session_state["_resume"] = resume_text
+            st.session_state.phase = 1
+            st.rerun()
+        except Exception as e:
+            _loader.empty()
+            st.error(f"❌  Skill extraction failed: {e}")
 
 
 # ═══════════════════════════════════════════
@@ -1509,7 +1411,6 @@ elif st.session_state.phase == 1:
     total_skills = len(probes)
 
     if si >= total_skills:
-        # All probes done — move to final analysis
         st.session_state.phase = 2
         st.rerun()
 
@@ -1518,7 +1419,6 @@ elif st.session_state.phase == 1:
     questions     = current_probe["questions"]
     total_q_this_skill = len(questions)
 
-    # Progress info
     total_questions = sum(len(p["questions"]) for p in probes)
     answered = sum(len(p["questions"]) for p in probes[:si]) + qi
     progress_pct = answered / total_questions if total_questions else 0
@@ -1541,7 +1441,6 @@ elif st.session_state.phase == 1:
         <div style='font-size:0.78rem; color:#2a3a52; margin-bottom:14px;'>Q{qi+1} of {total_q_this_skill} · Skill {si+1}/{total_skills}</div>
         """, unsafe_allow_html=True)
 
-        # Live calibration scores so far
         if st.session_state.skill_scores:
             st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.6rem; color:#2a3a52; letter-spacing:0.1em; margin-bottom:8px;">CALIBRATED SO FAR</div>', unsafe_allow_html=True)
             for sc in st.session_state.skill_scores:
@@ -1554,11 +1453,12 @@ elif st.session_state.phase == 1:
                     signal_cls = "cal-amber"
                 else:
                     signal_cls = "cal-red"
+                display = f"{sc_score}/10" if sc_score is not None else "skipped"
                 st.markdown(f"""
                 <div class="calibration-bar">
                   <span class="cal-icon">⬡</span>
                   <span class="cal-label">{sc["skill"]}</span>
-                  <span class="cal-score {signal_cls}">{sc_score if sc_score is not None else "—"}/10</span>
+                  <span class="cal-score {signal_cls}">{display}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -1569,7 +1469,6 @@ elif st.session_state.phase == 1:
         st.markdown('<div class="sp-card" style="min-height:500px;">', unsafe_allow_html=True)
         st.markdown('<div class="sp-section">⬡ Live Probe Interview</div>', unsafe_allow_html=True)
 
-        # Render chat history
         if st.session_state.chat_history:
             for msg in st.session_state.chat_history:
                 content = re.sub(r"<[^>]+>", "", str(msg.get("content", ""))).strip()
@@ -1598,13 +1497,11 @@ elif st.session_state.phase == 1:
                         unsafe_allow_html=True
                     )
 
-        # Ask current question
         if qi < total_q_this_skill:
             current_q = questions[qi]
             q_text = current_q.get("q", "")
             q_type = current_q.get("type", "")
 
-            # Show the question as an agent bubble (not yet in history)
             q_safe = re.sub(r"<[^>]+>", "", q_text).strip()
             st.markdown(
                 f'<div class="bubble agent">'
@@ -1630,45 +1527,55 @@ elif st.session_state.phase == 1:
                 skip = st.button("Skip →", key=f"skip_{si}_{qi}")
 
             if submit and answer.strip():
-                with st.spinner("Calibrating your answer..."):
-                    try:
-                        raw_eval = call_groq(None, EVALUATE_ANSWER_PROMPT.format(
-                            skill_name=skill["name"],
-                            required=skill.get("required_level", 7),
-                            claimed=skill.get("claimed_level", 5),
-                            question=q_text,
-                            answer=answer.strip()
-                        ))
-                        ev = parse_json(raw_eval)
-                        ev_score    = ev.get("score", 5)
-                        ev_signal   = ev.get("signal", "adequate")
-                        ev_feedback = ev.get("feedback", "Answer recorded.")
+                _eval_ph = show_loading(
+                    "Hold on a moment",
+                    "reading your answer · calibrating score",
+                )
+                try:
+                    raw_eval = call_groq(None, EVALUATE_ANSWER_PROMPT.format(
+                        skill_name=skill["name"],
+                        required=skill.get("required_level", 7),
+                        claimed=skill.get("claimed_level", 5),
+                        question=q_text,
+                        answer=answer.strip()
+                    ))
+                    ev = parse_json(raw_eval)
+                    ev_score    = ev.get("score", 5)
+                    ev_signal   = ev.get("signal", "adequate")
+                    ev_feedback = ev.get("feedback", "Answer recorded.")
 
-                        # Append to chat history
-                        st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
-                        st.session_state.chat_history.append({"role": "user",  "content": answer.strip()})
-                        clean_feedback = re.sub(r"<[^>]+>", "", ev_feedback).strip()
-                        st.session_state.chat_history.append({
-                            "role": "agent",
-                            "content": clean_feedback,
-                            "score": ev_score,
-                            "signal": ev_signal
-                        })
+                    st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
+                    st.session_state.chat_history.append({"role": "user",  "content": answer.strip()})
+                    clean_feedback = re.sub(r"<[^>]+>", "", ev_feedback).strip()
+                    st.session_state.chat_history.append({
+                        "role": "agent",
+                        "content": clean_feedback,
+                        "score": ev_score,
+                        "signal": ev_signal
+                    })
 
-                        # Advance
-                        next_qi = qi + 1
-                        if next_qi >= total_q_this_skill:
-                            recent_scores = [m["score"] for m in st.session_state.chat_history if m.get("score") is not None]
-                            avg = recent_scores[-1] if recent_scores else 5
-                            st.session_state.skill_scores.append({"skill": skill["name"], "score": avg})
-                            st.session_state.current_skill_idx += 1
-                            st.session_state.current_q_idx = 0
-                        else:
-                            st.session_state.current_q_idx = next_qi
+                    next_qi = qi + 1
+                    if next_qi >= total_q_this_skill:
+                        # ── PATCH 1: Average all scores for THIS skill only ──
+                        # Count how many questions were answered for this skill (qi+1 = current 0-based index + 1)
+                        answered_this_skill = qi + 1
+                        all_scored_msgs = [m for m in st.session_state.chat_history if m.get("score") is not None]
+                        # Take the last N scored messages, one per answered question
+                        this_skill_msgs = all_scored_msgs[-answered_this_skill:] if all_scored_msgs else []
+                        avg = round(
+                            sum(m["score"] for m in this_skill_msgs) / len(this_skill_msgs)
+                        ) if this_skill_msgs else 5
+                        st.session_state.skill_scores.append({"skill": skill["name"], "score": avg})
+                        st.session_state.current_skill_idx += 1
+                        st.session_state.current_q_idx = 0
+                    else:
+                        st.session_state.current_q_idx = next_qi
 
-                    except Exception as e:
-                        st.error(f"Evaluation error: {e}")
-                st.rerun()
+                    _eval_ph.empty()
+                    st.rerun()
+                except Exception as e:
+                    _eval_ph.empty()
+                    st.error(f"Evaluation error: {e}")
 
             if skip:
                 st.session_state.chat_history.append({"role": "agent", "content": q_text, "skill": skill["name"]})
@@ -1680,12 +1587,11 @@ elif st.session_state.phase == 1:
                 })
                 next_qi = qi + 1
                 if next_qi >= total_q_this_skill:
-                    # Mark as skipped — neutral, no score penalty, noted in report
+                    # ── PATCH 1b: Skipped skill — score=None, skipped=True, no penalty ──
                     st.session_state.skill_scores.append({
                         "skill": skill["name"],
                         "score": None,
                         "skipped": True,
-                        "skip_reason": "candidate skipped"
                     })
                     st.session_state.current_skill_idx += 1
                     st.session_state.current_q_idx = 0
@@ -1697,129 +1603,105 @@ elif st.session_state.phase == 1:
 
 
 # ═══════════════════════════════════════════
-#  PHASE 2 — RESULTS (Scoring + Report)
+#  PHASE 2 — RESULTS
 # ═══════════════════════════════════════════
 elif st.session_state.phase == 2:
-    # Run final analysis once
     if st.session_state.final_data is None:
         try:
-            import concurrent.futures
-            import time as _time
+            # Build transcript
+            transcript_lines = []
+            for msg in st.session_state.chat_history:
+                role_label = "INTERVIEWER" if msg["role"] == "agent" else "CANDIDATE"
+                line = f"{role_label}: {msg['content']}"
+                if msg.get("score"):
+                    line += f" [Evaluator score: {msg['score']}/10, signal: {msg.get('signal','')}]"
+                transcript_lines.append(line)
+            transcript = "\n".join(transcript_lines)
 
-            # ── Step 1: Compute final_data LOCALLY — zero LLM calls needed ──
-            # All scores already exist in skill_scores + skill_plan. Build the report instantly.
-            plan       = st.session_state.skill_plan or {}
-            role_title = plan.get("role", "the role")
-            plan_skills = {s["name"]: s for s in plan.get("skills", [])}
-            sc_map     = {s["skill"]: s for s in (st.session_state.skill_scores or [])}
-
-            skills_out = []
-            proven_scores = []
-            for sk_name, sk_info in plan_skills.items():
-                sc_entry  = sc_map.get(sk_name, {})
-                skipped   = sc_entry.get("skipped", False)
-                claimed   = sk_info.get("claimed_level", 5)
-                required  = sk_info.get("required_level", 7)
-                proven    = None if skipped else int(sc_entry.get("score") or claimed)
-                evidence  = "Skipped — not assessed in interview." if skipped else "Scored from live interview answers."
-                skills_out.append({
-                    "name":     sk_name,
-                    "claimed":  claimed,
-                    "current":  proven,
-                    "required": required,
-                    "skipped":  skipped,
-                    "evidence": evidence,
-                })
-                if not skipped:
-                    proven_scores.append(proven)
-
-            # Weighted proof score: 50% proven skills avg, 30% domain fit, 20% experience baseline
-            avg_proven   = (sum(proven_scores) / len(proven_scores) * 10) if proven_scores else 50
-            proof_score  = int(min(92, max(40, avg_proven * 0.5 + 65 * 0.3 + 70 * 0.2)))
-            resume_score = int(min(92, max(40, sum(s["claimed"] for s in skills_out) / max(len(skills_out),1) * 10 * 0.5 + 65 * 0.3 + 70 * 0.2)))
-
-            # Gaps = skills where proven < required (skip unassessed skills), sorted by gap size
-            gaps_sorted   = sorted(
-                [s for s in skills_out if s["current"] is not None and s["current"] < s["required"]],
-                key=lambda x: x["required"] - x["current"], reverse=True
+            # ── PATCH 2: Clean calibration — no None/null values sent to LLM ──
+            scored = [
+                {"skill": s["skill"], "score": s["score"]}
+                for s in st.session_state.skill_scores
+                if not s.get("skipped") and s.get("score") is not None
+            ]
+            skipped_names = [s["skill"] for s in st.session_state.skill_scores if s.get("skipped")]
+            calibration = json.dumps(scored)
+            skipped_note = (
+                f"Skills NOT assessed in live interview (candidate skipped): {', '.join(skipped_names)}. "
+                f"For these skills, infer current level from resume evidence ONLY — do NOT penalise the overall score."
+                if skipped_names
+                else "All skills were assessed live in the interview."
             )
-            top_gaps      = [s["name"] for s in gaps_sorted[:3]]
-            # Strengths = skills where proven >= required (skip unassessed skills)
-            strong_sorted = sorted(
-                [s for s in skills_out if s["current"] is not None and s["current"] >= s["required"]],
-                key=lambda x: x["current"], reverse=True
+
+            # ── PATCH 3: Parallel phase-2 calls ──
+            # Step A: run final analysis first (interview + roadmap depend on its output)
+            _final_ph = show_loading(
+                "Compiling your results",
+                "analysis · interview prep · roadmap",
+                steps=[
+                    ("Running calibrated analysis",  "active"),
+                    ("Generating interview prep",    "pending"),
+                    ("Building 14-day roadmap",      "pending"),
+                ]
             )
-            strengths     = [s["name"] for s in strong_sorted[:3]]
-            if not strengths:
-                strengths = [skills_out[0]["name"]] if skills_out else ["General Skills"]
 
-            skipped_names = [s["skill"] for s in (st.session_state.skill_scores or []) if s.get("skipped")]
-            cal_note = (f"Skipped: {', '.join(skipped_names)}. Resume used for those areas." if skipped_names
-                        else "All skills assessed via live interview.")
+            raw_final = call_groq(None, FINAL_ANALYSIS_PROMPT.format(
+                jd=st.session_state["_jd"][:3000],
+                resume=st.session_state["_resume"][:2500],
+                transcript=transcript[:4000],
+                calibration=calibration,
+                skipped_note=skipped_note,
+            ))
+            fd_tmp = parse_json(raw_final)
+            st.session_state.final_data = fd_tmp
 
-            fd_result = {
-                "score":            proof_score,
-                "resume_score":     resume_score,
-                "role":             role_title,
-                "summary":          f"Assessed for {role_title}. Proof Score: {proof_score}%. Key gaps: {', '.join(top_gaps) if top_gaps else 'None identified'}.",
-                "skills":           skills_out,
-                "top_gaps":         top_gaps,
-                "strengths":        strengths,
-                "calibration_note": cal_note,
-            }
-            st.session_state.final_data = fd_result
-            fd = fd_result
+            role_tmp     = fd_tmp.get("role", "the role")
+            gaps_tmp     = ", ".join(fd_tmp.get("top_gaps", []))
+            strengths_tmp = ", ".join(fd_tmp.get("strengths", []))
 
-            _final_ph = st.empty()
-            _final_ph.info("⬡  Generating interview prep & 14-day roadmap...")
+            # Update overlay to show next two are running in parallel
+            _final_ph.markdown(f"""
+            <div class="sp-loading-overlay">
+              <div class="sp-loading-card">
+                <div class="sp-loader-hex">{HEX_SVG}</div>
+                <div class="sp-loader-title">Almost there...</div>
+                <div class="sp-loader-sub">interview prep &amp; roadmap loading in parallel</div>
+                <div class="sp-loader-dots">
+                  <div class="sp-loader-dot"></div>
+                  <div class="sp-loader-dot"></div>
+                  <div class="sp-loader-dot"></div>
+                </div>
+                <div class="sp-loader-bar-wrap"><div class="sp-loader-bar"></div></div>
+                <div class="sp-loader-steps">
+                  <div class="sp-loader-step done"><div class="sp-loader-step-dot"></div>✓ Calibrated analysis complete</div>
+                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Generating interview prep</div>
+                  <div class="sp-loader-step active"><div class="sp-loader-step-dot"></div>→ Building 14-day roadmap</div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-            def _fetch_interview():
-                raw = call_groq(None, INTERVIEW_PREP_PROMPT.format(
-                    role=fd.get("role", "the role"),
-                    gaps=", ".join(fd.get("top_gaps", []))
-                ))
-                return parse_json(raw)
+            # Step B: interview prep + roadmap in parallel — saves ~50% of phase-2 wait time
+            def fetch_interview():
+                return call_groq(None, INTERVIEW_PREP_PROMPT.format(
+                    role=role_tmp, gaps=gaps_tmp))
 
-            def _fetch_roadmap():
-                raw = call_groq(None, ROADMAP_PROMPT.format(
-                    role=fd.get("role", "the role"),
-                    gaps=", ".join(fd.get("top_gaps", [])),
-                    strengths=", ".join(fd.get("strengths", []))
-                ), max_tokens=8000)
-                return parse_json(raw)
+            def fetch_roadmap():
+                return call_groq(None, ROADMAP_PROMPT.format(
+                    role=role_tmp, gaps=gaps_tmp, strengths=strengths_tmp))
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                fut_int  = executor.submit(_fetch_interview)
-                fut_road = executor.submit(_fetch_roadmap)
-                try:
-                    idata = fut_int.result(timeout=90)
-                except Exception as e:
-                    idata = []
-                try:
-                    rdata = fut_road.result(timeout=90)
-                except Exception as e:
-                    rdata = []
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                fut_int  = executor.submit(fetch_interview)
+                fut_road = executor.submit(fetch_roadmap)
+                raw_int  = fut_int.result()
+                raw_road = fut_road.result()
 
+            idata = parse_json(raw_int)
             st.session_state.interview_data = unwrap(idata) if isinstance(idata, (list, dict)) else []
+            rdata = parse_json(raw_road)
             st.session_state.roadmap_data   = unwrap(rdata) if isinstance(rdata, (list, dict)) else []
-            _final_ph.empty()
 
-            # ── Save completed assessment to history ──
-            if "assessment_history" not in st.session_state:
-                st.session_state.assessment_history = []
-            v_cls_h, v_lbl_h = verdict(int(fd.get("score", 0)))
-            st.session_state.assessment_history.insert(0, {
-                "id":             str(int(_time.time())),
-                "role":           fd.get("role", "Unknown Role"),
-                "score":          fd.get("score", 0),
-                "verdict":        v_lbl_h,
-                "timestamp":      _time.strftime("%d %b %Y, %H:%M"),
-                "final_data":     st.session_state.final_data,
-                "interview_data": st.session_state.interview_data,
-                "roadmap_data":   st.session_state.roadmap_data,
-                "skill_scores":   list(st.session_state.skill_scores),
-                "chat_history":   list(st.session_state.chat_history),
-            })
+            _final_ph.empty()
 
         except Exception as e:
             st.error(f"❌  Final analysis failed: {e}")
@@ -1840,7 +1722,6 @@ elif st.session_state.phase == 2:
 
     st.markdown('<div style="font-family:Space Mono,monospace; font-size:0.62rem; color:#006b50; letter-spacing:0.14em; margin-bottom:20px;">⬡ ASSESSMENT COMPLETE — CALIBRATED REPORT BELOW</div>', unsafe_allow_html=True)
 
-    # ROW 1: Score | Summary | Jobs
     col_score, col_sum, col_jobs = st.columns([1, 1.3, 1], gap="medium")
 
     with col_score:
@@ -1854,7 +1735,6 @@ elif st.session_state.phase == 2:
         <div style='font-family:Syne,sans-serif; font-size:0.85rem; font-weight:600; color:#4a6280; text-align:center; margin-top:10px;'>{role}</div>
         """, unsafe_allow_html=True)
 
-        # Resume vs Proven comparison
         delta = score - r_score
         delta_str = f"+{delta}" if delta >= 0 else str(delta)
         delta_clr = "#34d399" if delta >= 0 else "#f87171"
@@ -1922,39 +1802,28 @@ elif st.session_state.phase == 2:
 
     tags_html = ""
     for sk in skills:
-        current = sk.get("current")  # None when skipped
-        proxy   = current if current is not None else sk.get("claimed", 5)
-        gap_val = sk.get("required", 7) - proxy
+        gap_val = sk.get("required", 7) - sk.get("current", 5)
         dc, dl = delta_class(gap_val)
         tags_html += f'<span class="delta-tag {dc}">{sk["name"]} — {dl}</span>'
     st.markdown(f'<div style="margin-bottom:16px;">{tags_html}</div>', unsafe_allow_html=True)
 
     rows = ""
     for sk in skills:
-        claimed   = sk.get("claimed", 5)
-        proven    = sk.get("current")   # None when skipped
+        claimed   = sk.get("claimed", sk.get("current", 5))
+        proven    = sk.get("current", 5)
         required  = sk.get("required", 7)
-        skipped   = sk.get("skipped", proven is None)
+        gap_val   = max(0, required - proven)
+        bar_w     = int(gap_val / 9 * 100)
+        clr       = gap_color(gap_val)
         ev        = sk.get("evidence", "—")
-
-        if skipped or proven is None:
-            proven_display = '<span style="color:#4a6280;">—</span>'
-            drift_str      = '<span style="color:#4a6280;">—</span>'
-            gap_val        = max(0, required - claimed)   # use claimed as proxy for gap bar
-        else:
-            proven_display = f'{proven}/10'
-            drift          = proven - claimed
-            drift_str      = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
-                              else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
-                              else '<span style="color:#4a6280;">±0</span>')
-            gap_val        = max(0, required - proven)
-
-        bar_w = int(gap_val / 9 * 100)
-        clr   = gap_color(gap_val)
+        drift     = proven - claimed
+        drift_str = (f'<span style="color:#34d399;">+{drift}</span>' if drift > 0
+                     else f'<span style="color:#f87171;">{drift}</span>' if drift < 0
+                     else '<span style="color:#4a6280;">±0</span>')
         rows += f"""<tr>
           <td><b style='color:#dde4f0; font-family:Syne,sans-serif;'>{sk['name']}</b></td>
           <td style='text-align:center; color:#4a6280; font-family:Space Mono,monospace;'>{claimed}/10</td>
-          <td style='text-align:center; color:#00c896; font-family:Space Mono,monospace; font-weight:700;'>{proven_display}</td>
+          <td style='text-align:center; color:#00c896; font-family:Space Mono,monospace; font-weight:700;'>{proven}/10</td>
           <td style='text-align:center; color:#fbbf24; font-family:Space Mono,monospace;'>{required}/10</td>
           <td style='text-align:center; font-family:Space Mono,monospace; font-size:0.8rem;'>{drift_str}</td>
           <td>
@@ -1970,7 +1839,7 @@ elif st.session_state.phase == 2:
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
-    <div style='font-size:0.68rem; color:#1a2535; margin-top:8px; font-family:Space Mono,monospace;'>★ Proven = score from live interview answers · Drift = Proven minus Claimed</div>
+    <div style='font-size:0.68rem; color:#1a2535; margin-top:8px; font-family:Space Mono,monospace;'>★ Proven = score from live interview answers · Drift = Proven minus Claimed · Skipped skills inferred from resume</div>
     """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2025,25 +1894,21 @@ elif st.session_state.phase == 2:
 
     with col_road:
         st.markdown('<div class="sp-card">', unsafe_allow_html=True)
-        # total hours summary
         rdata = st.session_state.roadmap_data or []
         total_hours = sum(d.get("hours", 1.5) for d in rdata[:14])
         st.markdown(f'<div class="sp-section">14-Day Adjacency-Prioritised Roadmap <span style="font-size:0.65rem; color:#2a3a52; font-weight:400; letter-spacing:0;">· {total_hours:.0f} hrs total · ~{total_hours/14:.1f} hrs/day</span></div>', unsafe_allow_html=True)
         type_icons = {"video": "▶", "course": "🎓", "doc": "📖", "book": "📚", "github": "⬡"}
         if isinstance(rdata, list) and rdata:
             for d in rdata[:14]:
-                # Strip HTML from all text fields — model sometimes returns HTML tags in JSON strings
                 topic    = re.sub(r"<[^>]+>", "", str(d.get("topic", ""))).strip()
                 hours    = d.get("hours", 1.5)
                 day_num  = d.get("day", "?")
                 adj_raw  = re.sub(r"<[^>]+>", "", str(d.get("adjacency_note") or "")).strip()
                 adj_html = f'<div style="font-size:0.72rem; color:#00956e; font-style:italic; margin-bottom:3px;">↳ {adj_raw}</div>' if adj_raw and adj_raw.lower() != "null" else ""
 
-                # Strip HTML from each activity
                 acts = [re.sub(r"<[^>]+>", "", str(a)).strip() for a in d.get("activities", [])]
                 acts_str = " · ".join(acts)
 
-                # Build resource links — strip HTML from labels
                 res_parts = []
                 for r in d.get("resources", []):
                     label = re.sub(r"<[^>]+>", "", str(r.get("label", "Resource"))).strip()
@@ -2093,7 +1958,6 @@ elif st.session_state.phase == 2:
             st.markdown(f'<div style="font-size:0.8rem; color:#2a3a52; padding:3px 0; font-family:Space Mono,monospace;">D{d.get("day","?")} → {d.get("topic","")}</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Restart button
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("⬡  Start New Assessment"):
         for key in ["phase","skill_plan","probe_questions","chat_history",
@@ -2102,14 +1966,12 @@ elif st.session_state.phase == 2:
                     "_jd","_resume"]:
             if key in st.session_state:
                 del st.session_state[key]
-        # probe_mode intentionally kept so user doesn't re-select every time
         st.rerun()
 
-    # Footer
     st.markdown("""
     <div style='text-align:center; font-family:Space Mono,monospace; font-size:0.58rem; color:#0d1a2a;
                 padding:20px; border-top:1px solid rgba(255,255,255,0.03); margin-top:24px; letter-spacing:0.1em;'>
-      SKILLPROOF · CATALYST HACKATHON 2026 · DECCAN AI EXPERTS · QWEN · QWEN-PLUS
+      SKILLPROOF · CATALYST HACKATHON 2025 · DECCAN AI EXPERTS · QWEN · QWEN-PLUS
     </div>
     """, unsafe_allow_html=True)
 
