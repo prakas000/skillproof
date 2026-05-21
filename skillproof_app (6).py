@@ -1036,12 +1036,6 @@ def show_loading(title: str, subtitle: str, steps: list[tuple[str,str]] | None =
 
 PROVIDERS = [
     {
-        "name": "groq",
-        "secret_key": "GROQ_API_KEY",
-        "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.1-8b-instant",
-    },
-    {
         "name": "openai",
         "secret_key": "OPENAI_API_KEY",
         "base_url": "https://api.openai.com/v1",
@@ -1514,12 +1508,6 @@ if st.session_state.phase == 0:
                 if sk and qs:
                     all_probes.append({"skill": sk, "questions": qs[:q_per_skill]})
 
-            if not all_probes:
-                raise ValueError(
-                    "No interview questions were generated. "
-                    "The AI may have returned an unexpected format. "
-                    "Please try again."
-                )
             st.session_state.skill_plan      = plan
             st.session_state.probe_questions = all_probes
             st.session_state.chat_history    = []
@@ -1530,11 +1518,10 @@ if st.session_state.phase == 0:
             st.session_state["_resume"]        = resume_text
             st.session_state.phase             = 1
             _load_ph.empty()
-            st.rerun()
         except Exception as e:
             _load_ph.empty()
             st.error(f"❌  Skill extraction failed: {e}")
-            # Do NOT rerun — leave error visible so user can read it
+        st.rerun()
 
 
 # ═══════════════════════════════════════════
@@ -1545,13 +1532,6 @@ elif st.session_state.phase == 1:
     si       = st.session_state.current_skill_idx
     qi       = st.session_state.current_q_idx
     total_skills = len(probes)
-
-    if not probes:
-        st.error("❌ No interview questions found. Please go back and try again.")
-        if st.button("← Back to Input"):
-            st.session_state.phase = 0
-            st.rerun()
-        st.stop()
 
     if si >= total_skills:
         # All probes done — move to final analysis
